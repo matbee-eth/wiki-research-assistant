@@ -146,15 +146,19 @@ class SearchEngine:
             Processed results and progress updates
         """
         try:
+            logger.info(f"Starting to process batch of {len(batch)} results for query: {query}")
             # Filter out already cached articles
             uncached_articles = []
             cached_results = []
             
             for result in batch:
                 article_id = str(result.get('pageid', result.get('title', '')))
+                logger.debug(f"Checking cache for article: {article_id}")
                 cached = self._get_cached_article(article_id)
                 if cached:
+                    logger.info(f"Cache hit for article: {article_id}")
                     cached_results.append(cached)
+                    logger.debug(f"Yielding cached result for: {result.get('title', 'Unknown')}")
                     yield {
                         'type': 'result',
                         'data': cached,
@@ -163,11 +167,61 @@ class SearchEngine:
                         'stream': f'📚 Cached: {result.get("title", "Unknown")}'
                     }
                 else:
+                    logger.debug(f"Cache miss for article: {article_id}")
                     uncached_articles.append(result)
 
             if not uncached_articles:
+                # Process cached results with same format as normal processing
+                for i, result in enumerate(cached_results, 1):
+                    logger.debug(f"Processing result {i}: {result.get('title', 'Unknown')}")
+                    
+                    yield {
+                        'type': 'progress',
+                        'status': f'Processing article {i}/{len(cached_results)}: {result.get("title", "Unknown")}',
+                        'thought': f'🔄 Processing: {result.get("title", "Unknown")}',
+                        'stream': f'🔄 Processing: {result.get("title", "Unknown")}'
+                    }
+                    
+                    # Yield the wiki summary event
+                    yield {
+                        'type': 'wiki_summary',
+                        'data': result.get('text', 'No summary available.'),
+                        'status': f'Retrieved wiki summary for: {result.get("title", "Unknown")}',
+                        'thought': f'📖 Retrieved article summary {result.get("title", "Unknown")}',
+                        'stream': f'📖 Summary: {result.get("title", "Unknown")}'
+                    }
+                    
+                    # Yield the analysis event if it exists
+                    if 'analysis' in result:
+                        yield {
+                            'type': 'analysis',
+                            'data': result['analysis'],
+                            'status': f'Generated analysis for: {result.get("title", "Unknown")}',
+                            'thought': f'🔍 Generated article analysis {result.get("title", "Unknown")}',
+                            'stream': f'🔍 Analysis: {result.get("title", "Unknown")}'
+                        }
+                    
+                    # Yield the literature review if it exists
+                    if 'literature_review' in result:
+                        yield {
+                            'type': 'literature_review',
+                            'data': result['literature_review'],
+                            'status': f'Generated literature review for: {result.get("title", "Unknown")}',
+                            'thought': f'📚 Generated article review {result.get("title", "Unknown")}',
+                            'stream': f'📚 Review for: {result.get("title", "Unknown")}'
+                        }
+                    
+                    # Yield the final result
+                    yield {
+                        'type': 'result',
+                        'data': result,
+                        'status': f'Completed analysis of article {i}/{len(cached_results)}',
+                        'thought': f'✅ Article processing complete {result.get("title", "Unknown")}',
+                        'stream': f'✅ Completed: {result.get("title", "Unknown")}'
+                    }
                 return
 
+            logger.info(f"Preparing to process {len(uncached_articles)} uncached articles")
             # Generate analysis prompts for uncached articles
             prompts = []
             for result in uncached_articles:
@@ -186,6 +240,7 @@ class SearchEngine:
             
             # Start processing notification for uncached articles
             for i, result in enumerate(uncached_articles, 1):
+                logger.debug(f"Yielding progress update for article {i}/{len(uncached_articles)}: {result.get('title', 'Unknown')}")
                 yield {
                     'type': 'progress',
                     'status': f'Queued article {i}/{len(uncached_articles)}: {result.get("title", "Unknown")}',
@@ -197,10 +252,11 @@ class SearchEngine:
             async with aiohttp.ClientSession() as session:
                 # Notify starting GPT analysis
                 for i, result in enumerate(uncached_articles, 1):
+                    logger.debug(f"Yielding GPT analysis start notification for article {i}: {result.get('title', 'Unknown')}")
                     yield {
                         'type': 'progress',
                         'status': f'Starting GPT analysis for article {i}/{len(uncached_articles)}: {result.get("title", "Unknown")}',
-                        'thought': 'Sending to GPT for analysis...',
+                        'thought': f'🤖 Analysing and Synthesizing with AI... {result.get("title", "Unknown")}',
                         'stream': f'🤖 Analyzing: {result.get("title", "Unknown")}'
                     }
                 
@@ -210,8 +266,9 @@ class SearchEngine:
                 for i, (result, analysis) in enumerate(zip(uncached_articles, analyses), 1):
                     try:
                         # Notify starting post-processing
+                        logger.debug(f"Starting post-processing for article {i}: {result.get('title', 'Unknown')}")
                         yield {
-                            'type': 'progress',
+                            'type': 'processing',
                             'status': f'Post-processing article {i}/{len(uncached_articles)}: {result.get("title", "Unknown")}',
                             'thought': 'Processing GPT analysis results...',
                             'stream': f'🔄 Processing: {result.get("title", "Unknown")}'
@@ -224,10 +281,12 @@ class SearchEngine:
                             article_title = result.get('title', 'Unknown')
                             
                             if article_text:
+                                logger.debug(f"Generating literature review for: {article_title}")
                                 literature_review = generate_literature_review([article_text])
                                 result['literature_review'] = literature_review
                                 
                                 # Yield the literature review event
+                                logger.debug(f"Yielding literature review for: {article_title}")
                                 yield {
                                     'type': 'literature_review',
                                     'data': literature_review,
@@ -236,8 +295,15 @@ class SearchEngine:
                                     'stream': f'📚 Review for: {article_title}'
                                 }
                         except Exception as e:
-                            logger.error(f"Error generating literature review for article {result.get('title')}: {str(e)}")
+                            error_msg = f"Error generating literature review for article {result.get('title')}: {str(e)}"
+                            logger.error(error_msg, exc_info=True)
                             result['literature_review'] = "Error generating literature review"
+                            yield {
+                                'type': 'error',
+                                'error': error_msg,
+                                'status': 'Error in literature review generation',
+                                'stream': f'⚠️ Literature review failed for: {article_title}'
+                            }
                         
                         # Add analysis to result
                         processed_result = {
@@ -282,7 +348,7 @@ class SearchEngine:
                         logger.error(f"Error processing result {result.get('title')}: {str(e)}")
                         yield {
                             'type': 'error',
-                            'status': f'Error processing article {i}/{len(uncached_articles)}',
+                            'status': 'Error processing article',
                             'thought': f'Error analyzing {result.get("title", "Unknown")}',
                             'stream': f'❌ Error: Could not analyze {result.get("title", "Unknown")}'
                         }
@@ -382,6 +448,10 @@ class SearchEngine:
                     max_results=max_results
                 ):
                     current_batch.extend(batch)
+                    yield {
+                        'stream': f"📚 Found {len(batch)} articles...",
+                        'progress': min(progress + (i/len(variations)) * 0.5, 0.99)
+                    }
                     
                     # Process batch when it reaches a reasonable size or is the last batch
                     if len(current_batch) >= 10 or total_results + len(current_batch) >= max_results:
@@ -393,7 +463,14 @@ class SearchEngine:
                                     self._seen_urls.add(url)
                                     self._all_results.append(result)
                                     total_results += 1
+                                    
+                                    # Yield both progress and result
+                                    yield {
+                                        'stream': f"📄 Processing: {result.get('title', 'Unknown')}",
+                                        'progress': min(progress + (i/len(variations)) * 0.8, 0.99)
+                                    }
                                     yield {'result': result}
+                                    
                             elif update['type'] in ['literature_review', 'progress', 'error']:
                                 yield update
                                 
@@ -405,9 +482,6 @@ class SearchEngine:
                                     'progress': 1.0
                                 }
                                 return
-                        
-                        current_batch = []  # Clear the batch after processing
-            
             progress = min(progress + progress_step, 0.99)
             yield {
                 'stream': f"✨ Found {total_results} unique results so far...",

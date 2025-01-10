@@ -33,8 +33,13 @@ class DataSources:
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
-        if self.session:
-            await self.session.close()
+        try:
+            if self.session and not self.session.closed:
+                logger.debug("Closing data sources session...")
+                await self.session.close()
+                logger.debug("Session closed")
+        except Exception as e:
+            logger.error(f"Error closing data sources session: {str(e)}", exc_info=True)
 
     async def _init_embeddings(self):
         """Initialize embeddings asynchronously."""

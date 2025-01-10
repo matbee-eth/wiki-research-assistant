@@ -61,7 +61,6 @@ def main():
     
     # Initialize search engine and interface
     search_engine = SearchEngine()
-    interface = StreamInterface()
     
     # Create main columns for layout
     col1, col2 = st.columns([5, 1])
@@ -91,36 +90,26 @@ def main():
         if search_engine.get_all_results():
             st.download_button(
                 label="📥 Export Results",
-                data=interface.get_export_data(search_engine.get_all_results()),
+                data=search_engine.get_export_data(),
                 file_name="research_results.md",
                 mime="text/markdown",
                 key="export_button"
             )
     
-    # Create containers for progress and results
-    progress_container = st.container()
-    results_container = st.container()
-    
     # Handle search if button clicked
     if search_clicked and query:
-        # Create progress bar and log
-        progress_bar = progress_container.progress(0)
-        progress_log = progress_container.empty()
-        
         # Run search with parameters
-        asyncio.run(interface.stream_research_progress(
-            search_engine.search(
-                query=query,
-                max_results=max_results,
-                min_score=min_score,
-                max_variations=max_variations,
-                chunk_size=chunk_size
-            ),
-            progress_bar=progress_bar,
-            progress_log=progress_log,
-            results_container=results_container,
-            search_engine=search_engine
-        ))
+        search_generator = search_engine.search(
+            query=query,
+            max_results=max_results,
+            min_score=min_score,
+            max_variations=max_variations,
+            chunk_size=chunk_size
+        )
+        
+        # Create interface and run search
+        interface = StreamInterface()
+        asyncio.run(interface.stream_research_progress(search_generator))
 
 if __name__ == "__main__":
     main()

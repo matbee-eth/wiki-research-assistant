@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     from search_engine import SearchEngine
 
 # Configure logging
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 class StreamInterface:
     def __init__(self):
@@ -25,72 +25,6 @@ class StreamInterface:
         if 'displayed_results' not in st.session_state:
             st.session_state.displayed_results = set()
             
-        # Add styles
-        st.markdown("""
-            <style>
-                div[data-testid="stMarkdownContainer"] > .progress-log {
-                    height: 300px;
-                    overflow-y: auto;
-                    border: 1px solid rgba(250, 250, 250, 0.2);
-                    padding: 10px;
-                    border-radius: 5px;
-                    background-color: rgba(17, 17, 17, 0.7);
-                    margin-bottom: 20px;
-                    color: #fafafa;
-                    font-family: "Source Sans Pro", sans-serif;
-                }
-                .progress-log::-webkit-scrollbar {
-                    width: 8px;
-                }
-                .progress-log::-webkit-scrollbar-track {
-                    background: rgba(250, 250, 250, 0.1);
-                    border-radius: 4px;
-                }
-                .progress-log::-webkit-scrollbar-thumb {
-                    background: rgba(250, 250, 250, 0.3);
-                    border-radius: 4px;
-                }
-                .progress-log::-webkit-scrollbar-thumb:hover {
-                    background: rgba(250, 250, 250, 0.4);
-                }
-                .log-entry {
-                    margin: 4px 0;
-                    line-height: 1.5;
-                    color: #fafafa;
-                }
-                .log-section {
-                    margin-top: 12px;
-                    padding: 8px;
-                    background-color: rgba(250, 250, 250, 0.05);
-                    border-radius: 4px;
-                    border-left: 3px solid #00ff88;
-                }
-                .log-entry code {
-                    background-color: rgba(250, 250, 250, 0.1);
-                    padding: 2px 4px;
-                    border-radius: 3px;
-                    font-family: monospace;
-                }
-                .export-link {
-                    text-decoration: none;
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.3rem;
-                    background-color: #0066cc;
-                    color: white !important;
-                    font-weight: 500;
-                    display: inline-block;
-                    text-align: center;
-                    width: 100%;
-                    margin-top: 5px;
-                }
-                .export-link:hover {
-                    background-color: #0052a3;
-                    color: white !important;
-                    text-decoration: none;
-                }
-            </style>
-        """, unsafe_allow_html=True)
-        
         # Create empty containers
         self.progress_container = st.container()
         self.results_container = st.container()
@@ -110,34 +44,102 @@ class StreamInterface:
 
     def _format_message(self, message: str, container: Any = None):
         """Format and display a message."""
+        logger.debug(f"Formatting message: {message[:100]}...")
         if container:
+            logger.debug(f"Using provided container for message display")
             container.markdown(message)
         else:
+            logger.debug(f"Using default st.markdown for message display")
             st.markdown(message)
 
     def add_message(self, message: str, container: Any = None):
         """Add a message to the progress log."""
+        logger.info(f"Adding message to progress log: {message[:100]}...")
         formatted_message = self._format_message(message, container)
         st.session_state.messages.append(formatted_message)
+        logger.debug("Message added to session state")
         self._update_progress_log()
 
     def _update_progress_log(self):
-        """Update the progress log display."""
+        """Update the progress log display with enhanced categorization and styling."""
+        logger.debug(f"Updating progress log with {len(st.session_state.messages)} messages")
         if not st.session_state.messages:
+            logger.debug("No messages to display in progress log")
             return
             
-        # Create a formatted log with emojis for different message types
+        # Create a formatted log with emojis and styling for different message types
         log_entries = []
         for msg in st.session_state.messages:
-            # Add spacing between sections
-            if any(section in msg for section in ["📋 Research Plan:", "🔍 Analysis Results:", "🔄 Query Processing:", "🚀 Starting Search:"]):
-                # Format section headers with special styling
-                log_entries.append(f'<div class="log-entry log-section">{msg}</div>')
-            else:
-                # Format code snippets and queries
-                log_entries.append(f'<div class="log-entry">{msg}</div>')
+            entry_class = "log-entry"
+            
+            # Categorize and style different types of log messages
+            if "📋 Research Plan:" in msg:
+                entry_class += " log-section plan-section"
+            elif "🔍 Analysis:" in msg:
+                entry_class += " log-section analysis-section"
+            elif "📊 Analysis Results:" in msg:
+                entry_class += " log-section analysis-results"
+            elif "🔄 Query Processing:" in msg:
+                entry_class += " log-section query-section"
+            elif "🚀 Starting Search:" in msg:
+                entry_class += " log-section search-section"
+            elif "⚡ Progress Update:" in msg:
+                entry_class += " progress-update"
+            elif "📈 Score:" in msg or "relevance score:" in msg.lower():
+                entry_class += " score-entry"
+            elif "⚠️" in msg:
+                entry_class += " warning-entry"
+            elif "✅" in msg:
+                entry_class += " success-entry"
+            
+            log_entries.append(f'<div class="{entry_class}">{msg}</div>')
+        
+        # Enhanced CSS styling for different log categories
+        css = """
+        <style>
+            .progress-log {
+                max-height: 400px;
+                overflow-y: auto;
+                padding: 10px;
+                background: rgba(0,0,0,0.05);
+                border-radius: 5px;
+            }
+            .log-entry {
+                margin: 5px 0;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            .log-section {
+                font-weight: bold;
+                padding: 8px;
+                margin: 10px 0;
+                border-left: 3px solid #7E57C2;
+            }
+            .analysis-section {
+                border-left-color: #00BFA5;
+            }
+            .analysis-results {
+                border-left-color: #00B8D4;
+                background: rgba(0,184,212,0.1);
+            }
+            .score-entry {
+                color: #00BFA5;
+            }
+            .warning-entry {
+                color: #FFA726;
+            }
+            .success-entry {
+                color: #66BB6A;
+            }
+            .progress-update {
+                font-style: italic;
+                color: #9E9E9E;
+            }
+        </style>
+        """
         
         log_html = f"""
+        {css}
         <div class="progress-log" id="progress-log">
             {''.join(log_entries)}
         </div>
@@ -153,111 +155,137 @@ class StreamInterface:
         
         self.progress_log.markdown(log_html, unsafe_allow_html=True)
 
-    async def stream_research_progress(
-        self, 
-        search_generator: AsyncGenerator,
-        progress_bar: Any,
-        progress_log: Any,
-        results_container: Any,
-        search_engine: Any
-    ):
-        """Stream research progress updates."""
+    async def stream_research_progress(self, search_generator):
+        """Stream research progress and results."""
+        # Initialize session state if needed
+        if 'result_containers' not in st.session_state:
+            st.session_state.result_containers = {}
+        if 'displayed_results' not in st.session_state:
+            st.session_state.displayed_results = set()
+
         try:
-            # Create results area once
-            results_area = results_container.container()
-            results_area.markdown("### 📊 Search Results")
+            # Create layout containers
+            progress_log = st.container()
+            results_container = st.container()
             
-            # Create progress log area
-            progress_area = progress_log.container()
+            # Create progress bar
+            progress_bar = progress_log.progress(0.0)
+            
+            # Add header first
+            progress_log.markdown("### 🔄 Progress Log")
+            
+            # Create ONE container with the messages inside
+            progress_container = progress_log.container()
+            progress_container.markdown("""
+                <style>
+                    .progress-container {
+                        max-height: 300px;
+                        overflow-y: auto;
+                        padding: 10px;
+                        border: 1px solid rgba(250, 250, 250, 0.1);
+                        border-radius: 4px;
+                        margin-top: 1em;
+                    }
+                </style>
+            """, unsafe_allow_html=True)
+            
+            progress_placeholder = progress_container.empty()
             progress_messages = []
             
-            # Create a container for each result and track displayed sources
-            result_containers = {}
-            displayed_sources = set()
+            # Create results area in a separate container
+            results_area = results_container.container()
+            results_area.markdown("### 📈 Results Timeline")
+            timeline_placeholder = results_area.empty()
+            results_area.markdown("### 📚 Detailed Results")
             
+            async def update_progress(message):
+                progress_messages.append(message)
+                progress_placeholder.markdown(
+                    '<div class="progress-container">' + 
+                    '\n\n'.join(progress_messages) + 
+                    '</div>', 
+                    unsafe_allow_html=True
+                )
+
+            # Process search updates
+            async def process_stream(stream: AsyncGenerator[Dict, None]):
+                """Process a stream of results."""
+                logger.info("Starting to process stream")
+                try:
+                    async for item in stream:
+                        logger.debug(f"Received stream item of type: {item.get('type')}")
+                        
+                        if item.get('type') == 'result':
+                            logger.info(f"Processing result: {item.get('data', {}).get('title', 'Unknown')}")
+                            self._process_result(item)
+                            
+                        elif item.get('type') in ['progress', 'processing', 'thought']:
+                            logger.debug(f"Processing status update: {item.get('status', '')}")
+                            if 'stream' in item:
+                                self.add_message(item['stream'])
+                            if 'status' in item:
+                                self.add_message(item['status'])
+                                
+                        elif item.get('type') == 'error':
+                            logger.error(f"Received error in stream: {item.get('error', 'Unknown error')}")
+                            self.add_message(f"⚠️ Error: {item.get('error')}")
+                            
+                        else:
+                            logger.warning(f"Unknown stream item type: {item.get('type')}")
+                            
+                except Exception as e:
+                    logger.error(f"Error processing stream: {str(e)}", exc_info=True)
+                    self.add_message(f"⚠️ Error processing results: {str(e)}")
+
             # Process search updates
             async for update in search_generator:
-                if isinstance(update, dict):
-                    if 'stream' in update:
-                        # Add message to list and update display
-                        progress_messages.append(update['stream'])
-                        with progress_area:
-                            st.empty()  # Clear previous
-                            for msg in progress_messages:
-                                st.markdown(msg)
+                try:
+                
+                    logger.debug(f"Received update: {update}")
                     
+                    # Handle stream messages (main progress updates)
+                    
+                    if 'thought' in update:
+                        await update_progress(update['thought'])
+                    
+                    elif 'stream' in update:
+                        await update_progress(update['stream'])
+                    
+                    # Handle progress bar updates
                     if 'progress' in update:
                         progress_bar.progress(update['progress'])
-                    
-                    if 'result' in update:
-                        # Get all current results
-                        all_results = search_engine.get_all_results()
                         
-                        # Update or create containers for each result
-                        with results_area:
-                            for result in all_results:
-                                title = result['title']
-                                score = float(result['score'])
-                                source_url = result.get('url', '')
+                    # Handle search results
+                    if 'result' in update:
+                        result = update['result']
+                        logger.debug(f"Processing result: {result}")
+                        
+                        if isinstance(result, dict) and 'url' in result:
+                            if result['url'] not in st.session_state.displayed_results:
+                                st.session_state.displayed_results.add(result['url'])
+                                st.session_state.results.append(result)
                                 
-                                # Skip if we've already displayed this source
-                                if source_url in displayed_sources:
-                                    continue
-                                    
-                                # Create container if not exists
-                                if title not in result_containers:
-                                    result_containers[title] = results_area.expander(
-                                        f"{title} (Score: {score:.2f})"
-                                    )
+                                # Update the timeline in its placeholder
+                                timeline_fig = self.create_timeline_visualization(st.session_state.results)
+                                timeline_placeholder.plotly_chart(timeline_fig, use_container_width=True)
                                 
-                                # Update content
-                                with result_containers[title]:
-                                    if 'text' in result:
-                                        st.markdown("### Summary")
-                                        st.markdown(result['text'])
-                                        
-                                    if 'analysis' in result:
-                                        st.markdown("\n### Analysis")
-                                        st.markdown(result['analysis'])
-                                        
-                                    if 'literature_review' in result and result['literature_review']:
-                                        st.markdown("\n### Literature Review")
-                                        st.markdown(result['literature_review'])
-                                        
-                                    if source_url:
-                                        st.markdown(f"\nSource: [{source_url}]({source_url})")
-                                        displayed_sources.add(source_url)
-                    
-                    elif 'wiki_summary' in update:
-                        # Handle wiki summary update
-                        with progress_area:
-                            st.markdown("### 📖 Wiki Summary")
-                            st.markdown(update['data'])
-                            
-                    elif 'analysis' in update:
-                        # Handle analysis update
-                        with progress_area:
-                            st.markdown("### 🔍 Analysis")
-                            st.markdown(update['data'])
-                            
-                    elif 'literature_review' in update:
-                        # Handle literature review update
-                        with progress_area:
-                            st.markdown("### 📚 Literature Review")
-                            st.markdown(update['data'])
+                                # Create expander for result
+                                with results_area.expander(f"📄 {result.get('title', 'Untitled')}", expanded=False):
+                                    st.markdown(f"**Source:** {result['url']}")
+                                    if 'content' in result:
+                                        st.markdown(result['content'])
+                except Exception as e:
+                    logger.error(f"Error processing update: {e}", exc_info=True)
+                    logger.error(f"Update was: {update}")
         
             # Show export button if we have results
-            if search_engine.get_all_results():
+            if st.session_state.result_containers:
                 self.show_export_button()
                         
         except Exception as e:
             error_msg = f"❌ Error during search: {str(e)}"
             st.error(error_msg)
-            progress_messages.append(error_msg)
-            with progress_area:
-                st.empty()
-                for msg in progress_messages:
-                    st.markdown(msg)
+            progress_placeholder.write(error_msg)
 
     def clear_results(self):
         """Clear the current results."""
@@ -394,8 +422,8 @@ class StreamInterface:
         # Add edges
         for edge in edges:
             fig.add_trace(go.Scatter(
-                x=[nodes[edge['source']]['x'], nodes[edge['target']]['x']],
-                y=[nodes[edge['source']]['y'], nodes[edge['target']]['y']],
+                x=[nodes[edge['source']]['x'], nodes[edge['source']]['x']],
+                y=[nodes[edge['source']]['y'], nodes[edge['source']]['y']],
                 mode='lines',
                 line=dict(width=1, color=self.theme['text']),
                 hoverinfo='none',
@@ -455,30 +483,85 @@ class StreamInterface:
         with results_container:
             st.markdown("### 📊 Search Results")
 
+    def create_timeline_visualization(self, results: List[Dict]) -> go.Figure:
+        """Create a timeline visualization of search results."""
+        # Sort results by date if available, otherwise use order of discovery
+        sorted_results = sorted(results, key=lambda x: x.get('date', ''))
+        
+        # Prepare data for timeline
+        titles = [r.get('title', 'Untitled') for r in sorted_results]
+        texts = [f"{r.get('title', 'Untitled')}<br>Score: {r.get('score', 0):.2f}" for r in sorted_results]
+        
+        # Create timeline figure
+        fig = go.Figure()
+        
+        # Add timeline events
+        fig.add_trace(go.Scatter(
+            x=list(range(len(sorted_results))),
+            y=[1] * len(sorted_results),
+            mode='markers+text',
+            marker=dict(
+                size=20,
+                color=self.theme['accent1'],
+                line=dict(color=self.theme['accent2'], width=2)
+            ),
+            text=titles,
+            textposition="top center",
+            hovertext=texts,
+            hoverinfo='text'
+        ))
+        
+        # Update layout
+        fig.update_layout(
+            showlegend=False,
+            plot_bgcolor=self.theme['background'],
+            paper_bgcolor=self.theme['background'],
+            font=dict(color=self.theme['text']),
+            height=200,
+            margin=dict(l=20, r=20, t=50, b=20),
+            yaxis=dict(
+                showgrid=False,
+                showticklabels=False,
+                range=[0.5, 1.5]
+            ),
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(255,255,255,0.1)',
+                title='Results Timeline'
+            )
+        )
+        
+        return fig
+
     def _display_results(self, container: Any = None):
         """Display search results."""
+        if container is None:
+            container = self.results_container
+
         results = self.get_results()
         if not results:
+            container.warning("No results to display.")
             return
+
+        # Add timeline visualization
+        container.markdown("### 📈 Results Timeline")
+        timeline_fig = self.create_timeline_visualization(results)
+        container.plotly_chart(timeline_fig, use_container_width=True)
+
+        # Display individual results
+        container.markdown("### 📚 Detailed Results")
+        for result in results:
+            title = result['title']
+            score = float(result['score'])
             
-        target = container if container else st
-        
-        with target:
-            st.markdown("### 📊 Search Results")
-            
-            # Display each result in its own expander
-            for result in results:
-                title = result['title']
-                score = float(result['score'])
-                
-                with st.expander(f"{title} (Score: {score:.2f})"):
-                    if 'content' in result:
-                        st.markdown(result['content'])
-                    if 'literature_review' in result and result['literature_review']:
-                        st.markdown("\n### Literature Review")
-                        st.markdown(result['literature_review'])
-                    if 'url' in result:
-                        st.markdown(f"\nSource: [{result['url']}]({result['url']})")
+            with container.expander(f"{title} (Score: {score:.2f})"):
+                if 'content' in result:
+                    container.markdown(result['content'])
+                if 'literature_review' in result and result['literature_review']:
+                    container.markdown("\n### Literature Review")
+                    container.markdown(result['literature_review'])
+                if 'url' in result:
+                    container.markdown(f"\nSource: [{result['url']}]({result['url']})")
 
     def show_export_button(self):
         """Show the export button."""
