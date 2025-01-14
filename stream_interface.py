@@ -91,6 +91,10 @@ class StreamInterface:
                 entry_class += " warning-entry"
             elif "✅" in msg:
                 entry_class += " success-entry"
+            elif "❌" in msg:
+                entry_class += " error-entry"
+            elif "🔍 Checking" in msg:
+                entry_class += " fact-check-entry"
             
             log_entries.append(f'<div class="{entry_class}">{msg}</div>')
         
@@ -130,6 +134,13 @@ class StreamInterface:
             }
             .success-entry {
                 color: #66BB6A;
+            }
+            .error-entry {
+                color: #FF5252;
+            }
+            .fact-check-entry {
+                color: #7E57C2;
+                font-style: italic;
             }
             .progress-update {
                 font-style: italic;
@@ -208,46 +219,13 @@ class StreamInterface:
                 )
 
             # Process search updates
-            async def process_stream(stream: AsyncGenerator[Dict, None]):
-                """Process a stream of results."""
-                logger.info("Starting to process stream")
-                try:
-                    async for item in stream:
-                        logger.debug(f"Received stream item of type: {item.get('type')}")
-                        
-                        if item.get('type') == 'result':
-                            logger.info(f"Processing result: {item.get('data', {}).get('title', 'Unknown')}")
-                            self._process_result(item)
-                            
-                        elif item.get('type') in ['progress', 'processing', 'thought']:
-                            logger.debug(f"Processing status update: {item.get('status', '')}")
-                            if 'stream' in item:
-                                self.add_message(item['stream'])
-                            if 'status' in item:
-                                self.add_message(item['status'])
-                                
-                        elif item.get('type') == 'error':
-                            logger.error(f"Received error in stream: {item.get('error', 'Unknown error')}")
-                            self.add_message(f"⚠️ Error: {item.get('error')}")
-                            
-                        else:
-                            logger.warning(f"Unknown stream item type: {item.get('type')}")
-                            
-                except Exception as e:
-                    logger.error(f"Error processing stream: {str(e)}", exc_info=True)
-                    self.add_message(f"⚠️ Error processing results: {str(e)}")
-
-            # Process search updates
             async for update in search_generator:
                 try:
-                
                     logger.debug(f"Received update: {update}")
                     
                     # Handle stream messages (main progress updates)
-                    
                     if 'thought' in update:
                         await update_progress(update['thought'])
-                    
                     elif 'stream' in update:
                         await update_progress(update['stream'])
                     
@@ -255,31 +233,54 @@ class StreamInterface:
                     if 'progress' in update:
                         progress_bar.progress(update['progress'])
                         
-                    # Handle search results
-                    if 'result' in update:
-                        result = update['result']
-                        logger.debug(f"Processing result: {result}")
+                    # Handle fact check results
+                    if update.get('type') == 'fact_check_result':
+                        result_data = update.get('data', {})
+                        if result_data.get('verdict') == 'irrelevant':
+                            # Skip displaying irrelevant results
+                            continue
                         
-                        if isinstance(result, dict) and 'url' in result:
-                            if result['url'] not in st.session_state.displayed_results:
-                                st.session_state.displayed_results.add(result['url'])
-                                st.session_state.results.append(result)
-                                
-                                # Update the timeline in its placeholder
+                    # Handle detailed results
+                    if update.get('type') == 'detailed_result' and 'data' in update:
+                        result = update['data']
+                        logger.debug(f"Processing detailed result: {result.get('title', 'Unknown')}")
+                        
+                        # Add to session state if not already displayed
+                        result_id = result.get('pageid', result.get('title', ''))
+                        if result_id and result_id not in st.session_state.displayed_results:
+                            st.session_state.displayed_results.add(result_id)
+                            st.session_state.results.append(result)
+                            
+                            # Update the timeline
+                            if len(st.session_state.results) > 0:
                                 timeline_fig = self.create_timeline_visualization(st.session_state.results)
                                 timeline_placeholder.plotly_chart(timeline_fig, use_container_width=True)
-                                
-                                # Create expander for result
-                                with results_area.expander(f"📄 {result.get('title', 'Untitled')}", expanded=False):
-                                    st.markdown(f"**Source:** {result['url']}")
-                                    if 'content' in result:
-                                        st.markdown(result['content'])
+                            
+                            # Create expander for result
+                            with results_area.expander(f"📄 {result.get('title', 'Untitled')}", expanded=False):
+                                if 'text' in result:
+                                    st.markdown("### Summary")
+                                    st.markdown(result['text'])
+                                if 'fact_checking_validation' in result:
+                                    st.markdown("### Relevance Check")
+                                    validation = result['fact_checking_validation']
+                                    st.markdown(f"**Verdict:** {'✅ Relevant' if validation['is_valid'] else '❌ Not Relevant'}")
+                                    st.markdown(f"**Explanation:** {validation['explanation']}")
+                                if 'analysis' in result:
+                                    st.markdown("### Analysis")
+                                    st.markdown(result['analysis'])
+                                if 'literature_review' in result:
+                                    st.markdown("### Literature Review")
+                                    st.markdown(result['literature_review'])
+                                if 'score' in result:
+                                    st.markdown(f"**Relevance Score:** {result['score']:.2f}")
+                                    
                 except Exception as e:
                     logger.error(f"Error processing update: {e}", exc_info=True)
                     logger.error(f"Update was: {update}")
         
             # Show export button if we have results
-            if st.session_state.result_containers:
+            if st.session_state.results:
                 self.show_export_button()
                         
         except Exception as e:

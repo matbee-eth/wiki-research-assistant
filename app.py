@@ -101,7 +101,6 @@ def main():
         # Run search with parameters
         search_generator = search_engine.search(
             query=query,
-            max_results=max_results,
             min_score=min_score,
             max_variations=max_variations,
             chunk_size=chunk_size

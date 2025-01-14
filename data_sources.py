@@ -27,8 +27,10 @@ class DataSources:
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self.session = aiohttp.ClientSession()
-        self.embeddings = await self._init_embeddings()
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+        if not self.embeddings:
+            self.embeddings = await self._init_embeddings()
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -38,6 +40,12 @@ class DataSources:
                 logger.debug("Closing data sources session...")
                 await self.session.close()
                 logger.debug("Session closed")
+            
+            # Clean up embeddings if needed
+            if self.embeddings:
+                logger.debug("Cleaning up embeddings...")
+                self.embeddings = None
+                
         except Exception as e:
             logger.error(f"Error closing data sources session: {str(e)}", exc_info=True)
 
@@ -53,23 +61,22 @@ class DataSources:
             logger.error(f"Error during initialization: {str(e)}", exc_info=True)
             raise
         
-    async def search_wikipedia(self, query: str, min_score: float = 0.8, max_results: int = 250) -> List[Dict[str, Any]]:
+    async def search_wikipedia(self, query: str, min_score: float = 0.8) -> List[Dict[str, Any]]:
         """
         Search Wikipedia articles using semantic search.
         
         Args:
             query: Search query
             min_score: Minimum similarity score threshold (0-1)
-            max_results: Maximum number of results to return
             
         Returns:
             List of search results with metadata above the score threshold
         """
-        logger.info(f"Searching Wikipedia for query: '{query}' with min_score {min_score}, max_results {max_results}")
+        logger.info(f"Searching Wikipedia for query: '{query}' with min_score {min_score}")
         try:
-            # Perform semantic search with specified limit
+            # Perform semantic search with a high initial limit to get enough results for filtering
             logger.debug("Performing txtai semantic search...")
-            raw_results = self.embeddings.search(str(query), limit=max_results)
+            raw_results = self.embeddings.search(str(query), limit=1000)  # Get more results initially for better filtering
             
             # Process and filter results
             results = []
@@ -246,27 +253,25 @@ class DataSources:
             logger.error(f"Error fetching real-time news: {e}", exc_info=True)
             return []
 
-    async def stream_search_wikipedia(self, query: str, min_score: float = 0.8, max_results: int = 250) -> AsyncGenerator[List[Dict[str, Any]], None]:
+    async def stream_search_wikipedia(self, query: str, min_score: float = 0.8) -> AsyncGenerator[List[Dict[str, Any]], None]:
         """
-        Stream Wikipedia search results.
+        Stream Wikipedia search results as they are processed.
         
         Args:
             query: Search query
             min_score: Minimum similarity score threshold (0-1)
-            max_results: Maximum number of results to retrieve
             
         Yields:
-            Batches of processed search results
+            Batches of search results with metadata above the score threshold
         """
-        logger.info(f"Streaming Wikipedia search for query: '{query}' with min_score {min_score}, max_results {max_results}")
-        
+        logger.info(f"Streaming Wikipedia search for query: '{query}' with min_score {min_score}")
         try:
-            # Perform semantic search with specified limit
+            # Perform semantic search with a high initial limit to get enough results for filtering
             logger.debug("Performing txtai semantic search...")
-            raw_results = self.embeddings.search(str(query), limit=max_results)
+            raw_results = self.embeddings.search(str(query), limit=1000)  # Get more results initially for better filtering
             
             # Process and filter results
-            results = []
+            filtered_results = []
             for r in raw_results:
                 if isinstance(r, (list, tuple)):
                     score = r[0]
@@ -274,57 +279,64 @@ class DataSources:
                     score = r.get('score', 0.0)
                 
                 if score >= min_score:
-                    results.append(r)
+                    filtered_results.append(r)
             
-            if not results:
+            if not filtered_results:
                 logger.warning(f"No results found for query: {query}")
+                yield []
                 return
                 
-            logger.info(f"Found {len(results)} results above score threshold {min_score}")
+            logger.info(f"Found {len(filtered_results)} results above score threshold {min_score}")
             
             # Process results in batches
             batch_size = 10
-            for i in range(0, len(results), batch_size):
-                batch = results[i:i + batch_size]
-                processed_batch = []
-                
-                for result in batch:
-                    try:
-                        # Handle both tuple and dict result formats
-                        if isinstance(result, (list, tuple)):
-                            score, text, article_id = result
-                        else:
-                            score = result.get('score', 0.0)
-                            text = result.get('text', '')
-                            article_id = result.get('id', '')
-                        
-                        # Skip invalid results
-                        if not text or not article_id:
-                            continue
-                            
-                        # Get article metadata
-                        metadata = await self.get_wikipedia_page(article_id)
-                        if not metadata:
-                            continue
-                            
-                        # Create result data
-                        result_data = {
-                            **metadata,
-                            "score": float(score),
-                            "text": text
-                        }
-                        processed_batch.append(result_data)
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing result: {str(e)}", exc_info=True)
-                        continue
-                
-                if processed_batch:
-                    yield processed_batch
+            current_batch = []
+            
+            for result in filtered_results:
+                try:
+                    # Handle both tuple and dict result formats
+                    if isinstance(result, (list, tuple)):
+                        score, text, article_id = result
+                    else:
+                        score = result.get('score', 0.0)
+                        text = result.get('text', '')
+                        article_id = result.get('id', '')
                     
+                    # Skip invalid results
+                    if not text or not article_id:
+                        continue
+                        
+                    # Get article metadata
+                    metadata = await self.get_wikipedia_page(article_id)
+                    if not metadata:
+                        continue
+                        
+                    # Create result data
+                    result_data = {
+                        **metadata,
+                        "score": float(score),
+                        "text": text
+                    }
+                    current_batch.append(result_data)
+                    
+                    # Yield batch when it reaches the desired size
+                    if len(current_batch) >= batch_size:
+                        yield current_batch
+                        current_batch = []
+                    
+                except Exception as e:
+                    logger.error(f"Error processing result: {str(e)}", exc_info=True)
+                    continue
+            
+            # Yield any remaining results
+            if current_batch:
+                yield current_batch
+            
+            logger.info("Completed streaming search results")
+            
         except Exception as e:
-            logger.error(f"Error in stream_search_wikipedia: {str(e)}", exc_info=True)
-            return
+            logger.error(f"Error during streaming Wikipedia search: {str(e)}", exc_info=True)
+            yield []
 
     async def _fetch_wikipedia_article(self, article_id: str) -> Dict[str, Any]:
         """Fetch article content from Wikipedia API."""
