@@ -1,6 +1,7 @@
 # Semantic Research Assistant
 
 A powerful research tool that leverages AI to search, analyze, and generate literature reviews from Wikipedia articles.
+
 [Screencast from 2025-01-15 12:35:52 PM (trimmed).webm](https://github.com/user-attachments/assets/bd288b53-90ef-48e4-9200-5a2b7339fbb3)
 
 ## Features
