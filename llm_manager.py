@@ -28,11 +28,11 @@ class LLMManager:
         except Exception as e:
             self.logger.error(f"Error closing LLM manager session: {str(e)}", exc_info=True)
 
-    async def get_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.3, stream: bool = False) -> str:
+    async def get_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.9, stream: bool = False) -> str:
         """Get response from LLM."""
         try:
             if not self.session:
-                self.session = aiohttp.ClientSession()
+                raise RuntimeError("LLMManager must be used as an async context manager")
             return await fetch_gpt_response(self.session, prompt, max_tokens, model, temperature, stream)
         except Exception as e:
             self.logger.error(f"Error getting LLM response: {str(e)}")
@@ -80,10 +80,22 @@ class LLMManager:
             self.logger.error(f"Error getting JSON response: {str(e)}")
             return {}
 
-    async def get_string_response(self, prompt: str, max_tokens: int = None) -> str:
-        """Get string response from LLM."""
+    async def get_string_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.9, stream: bool = False) -> str:
+        """
+        Get string response from LLM.
+        
+        Args:
+            prompt: The prompt to send to the LLM
+            max_tokens: Maximum number of tokens in the response
+            model: The model to use (default: phi4)
+            temperature: Temperature parameter for generation (default: 0.9)
+            stream: Whether to stream the response (default: False)
+            
+        Returns:
+            String response from the LLM
+        """
         try:
-            return await self.get_response(prompt, max_tokens)
+            return await self.get_response(prompt, max_tokens, model=model, temperature=temperature, stream=stream)
         except Exception as e:
             self.logger.error(f"Error getting string response: {str(e)}")
             return ""

@@ -99,7 +99,7 @@ OPENAI_SEMAPHORE = asyncio.Semaphore(5)  # Limit concurrent API calls
 
 @log_function_call
 @retry_on_error
-async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperature=0.3, stream=False):
+async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperature=0.9, stream=False):
     """
     Fetch response from GPT API.
     
@@ -140,7 +140,7 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
                 if not stream:
                     try:
                         data = await response.json()
-                        logger.debug(f"API response data: {json.dumps(data, indent=2)}")
+                        # logger.debug(f"API response data: {json.dumps(data, indent=2)}")
                         if isinstance(data, dict) and 'choices' in data:
                             content = data['choices'][0]['message']['content'].strip()
                             logger.debug(f"Extracted content: {content}")
@@ -203,7 +203,7 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
 
 @log_function_call
 @retry_on_error
-async def fetch_gpt_response_parallel(session, prompts, max_tokens=None, model="phi4", temperature=0.3):
+async def fetch_gpt_response_parallel(session, prompts, max_tokens=None, model="phi4", temperature=0.9):
     """
     Fetch responses from GPT API in parallel with rate limiting.
     

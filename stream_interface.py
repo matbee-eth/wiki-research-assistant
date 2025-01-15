@@ -1,6 +1,6 @@
 import streamlit as st
 import logging
-from typing import Dict, List, TYPE_CHECKING, AsyncGenerator, Any
+from typing import Dict, List, TYPE_CHECKING, AsyncGenerator, Any, Optional
 import plotly.graph_objects as go
 import asyncio
 import datetime
@@ -14,20 +14,34 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class StreamInterface:
-    def __init__(self):
+    """Interface for streaming research results."""
+    
+    def __init__(
+        self, 
+        progress_placeholder: Optional[st.empty] = None,
+        results_container: Optional[st.container] = None
+    ):
         """Initialize the interface."""
-        if 'results' not in st.session_state:
-            st.session_state.results = []
-        if 'messages' not in st.session_state:
-            st.session_state.messages = []
-        if 'results_count' not in st.session_state:
-            st.session_state.results_count = 0
-        if 'displayed_results' not in st.session_state:
-            st.session_state.displayed_results = set()
-            
-        # Create empty containers
-        self.progress_container = st.container()
+        # Create status columns
+        cols = st.columns(3)
+        self.step_col = cols[0].empty()
+        self.count_col = cols[1].empty()
+        self.complete_col = cols[2].empty()
+        
+        # Create progress bar
+        self.progress_bar = st.empty()
+        
+        # Create results container
         self.results_container = st.container()
+        
+        # Initialize state
+        self._progress = 0.0
+        self._results = {}
+        self._result_containers = {}
+        self._total_steps = 0
+        self._current_step_index = 0
+        self._current_step_progress = 0.0
+        self._current_step = None
         
         self.min_score = 0.8  # Default min_score
         self.theme = {
@@ -166,127 +180,216 @@ class StreamInterface:
         
         self.progress_log.markdown(log_html, unsafe_allow_html=True)
 
-    async def stream_research_progress(self, search_generator):
-        """Stream research progress and results."""
-        # Initialize session state if needed
-        if 'result_containers' not in st.session_state:
-            st.session_state.result_containers = {}
-        if 'displayed_results' not in st.session_state:
-            st.session_state.displayed_results = set()
-
-        try:
-            # Create layout containers
-            progress_log = st.container()
-            results_container = st.container()
-            
-            # Create progress bar
-            progress_bar = progress_log.progress(0.0)
-            
-            # Add header first
-            progress_log.markdown("### 🔄 Progress Log")
-            
-            # Create ONE container with the messages inside
-            progress_container = progress_log.container()
-            progress_container.markdown("""
-                <style>
-                    .progress-container {
-                        max-height: 300px;
-                        overflow-y: auto;
-                        padding: 10px;
-                        border: 1px solid rgba(250, 250, 250, 0.1);
-                        border-radius: 4px;
-                        margin-top: 1em;
-                    }
-                </style>
-            """, unsafe_allow_html=True)
-            
-            progress_placeholder = progress_container.empty()
-            progress_messages = []
-            
-            # Create results area in a separate container
-            results_area = results_container.container()
-            results_area.markdown("### 📈 Results Timeline")
-            timeline_placeholder = results_area.empty()
-            results_area.markdown("### 📚 Detailed Results")
-            
-            async def update_progress(message):
-                progress_messages.append(message)
-                progress_placeholder.markdown(
-                    '<div class="progress-container">' + 
-                    '\n\n'.join(progress_messages) + 
-                    '</div>', 
-                    unsafe_allow_html=True
-                )
-
-            # Process search updates
-            async for update in search_generator:
-                try:
-                    logger.debug(f"Received update: {update}")
-                    
-                    # Handle stream messages (main progress updates)
-                    if 'thought' in update:
-                        await update_progress(update['thought'])
-                    elif 'stream' in update:
-                        await update_progress(update['stream'])
-                    
-                    # Handle progress bar updates
-                    if 'progress' in update:
-                        progress_bar.progress(update['progress'])
-                        
-                    # Handle fact check results
-                    if update.get('type') == 'fact_check_result':
-                        result_data = update.get('data', {})
-                        if result_data.get('verdict') == 'irrelevant':
-                            # Skip displaying irrelevant results
-                            continue
-                        
-                    # Handle detailed results
-                    if update.get('type') == 'detailed_result' and 'data' in update:
-                        result = update['data']
-                        logger.debug(f"Processing detailed result: {result.get('title', 'Unknown')}")
-                        
-                        # Add to session state if not already displayed
-                        result_id = result.get('pageid', result.get('title', ''))
-                        if result_id and result_id not in st.session_state.displayed_results:
-                            st.session_state.displayed_results.add(result_id)
-                            st.session_state.results.append(result)
-                            
-                            # Update the timeline
-                            if len(st.session_state.results) > 0:
-                                timeline_fig = self.create_timeline_visualization(st.session_state.results)
-                                timeline_placeholder.plotly_chart(timeline_fig, use_container_width=True)
-                            
-                            # Create expander for result
-                            with results_area.expander(f"📄 {result.get('title', 'Untitled')}", expanded=False):
-                                if 'text' in result:
-                                    st.markdown("### Summary")
-                                    st.markdown(result['text'])
-                                if 'fact_checking_validation' in result:
-                                    st.markdown("### Relevance Check")
-                                    validation = result['fact_checking_validation']
-                                    st.markdown(f"**Verdict:** {'✅ Relevant' if validation['is_valid'] else '❌ Not Relevant'}")
-                                    st.markdown(f"**Explanation:** {validation['explanation']}")
-                                if 'analysis' in result:
-                                    st.markdown("### Analysis")
-                                    st.markdown(result['analysis'])
-                                if 'literature_review' in result:
-                                    st.markdown("### Literature Review")
-                                    st.markdown(result['literature_review'])
-                                if 'score' in result:
-                                    st.markdown(f"**Relevance Score:** {result['score']:.2f}")
-                                    
-                except Exception as e:
-                    logger.error(f"Error processing update: {e}", exc_info=True)
-                    logger.error(f"Update was: {update}")
+    def _update_status(self, step: str = "", count: int = 0, complete: bool = False):
+        """Update the status display."""
+        self.step_col.markdown(f"**Step:** {step}")
         
-            # Show export button if we have results
-            if st.session_state.results:
-                self.show_export_button()
+        # For validate_claim step, show Valid/Invalid counts alongside total results
+        if step == 'validate_claim':
+            # Only count definitively valid/invalid results
+            valid_count = len([r for r in self._results.values() 
+                             if r.get('validation', {}).get('is_valid', False)])
+            invalid_count = len([r for r in self._results.values() 
+                               if r.get('validation', {}).get('is_valid') is False])  # Explicitly False
+            
+            self.count_col.markdown(
+                f"**Results:** {count}\n"
+                f"**Valid:** {valid_count}\n"
+                f"**Invalid:** {invalid_count}"
+            )
+        else:
+            self.count_col.markdown(f"**Results:** {count}")
+            
+        if complete:
+            self.complete_col.markdown("✅ Search Complete!")
+        else:
+            self.complete_col.empty()
+            
+    def _update_progress(self, progress: float = 0):
+        """Update just the progress bar."""
+        if progress is not None:
+            self._progress = min(progress, 0.99)
+        self.progress_bar.progress(self._progress)
+
+    async def stream_research_progress(self, pipeline_generator: AsyncGenerator[Dict[str, Any], None]):
+        """
+        Stream progress updates and results from the pipeline.
+        
+        Args:
+            pipeline_generator: Async generator yielding pipeline updates
+        """
+        try:
+            self._progress = 0.0
+            self._results = {}  # Track results by ID
+            self._result_containers = {}  # Track containers by ID
+            self._current_step_index = 0
+            self._current_step_progress = 0.0
+            self._step_progress = {}  # Track progress for each step
+            
+            # Create results area
+            results_area = self.results_container.container()
+            results_area.markdown("### 📚 Search Results")
+            
+            async for update in pipeline_generator:
+                update_type = update.get('type')
+                logger.debug(f"Received pipeline update type: {update_type} from step: {update.get('step', 'unknown')}, {update.get('data', 'unknown')}")
+                pipeline_data = update.get('data', {})
+                step = update.get('step')
+                if update_type == 'progress':
+                    step = update.get('step', '')
+                    total_steps = update.get('total_steps', 0)
+                    sub_step = update.get('sub_step', '')
+                    total = update.get('total', 0)
+                    processed = update.get('processed', 0)
+                    status = update.get('status', '')
+                    
+                    if total_steps > 0:
+                        self._total_steps = total_steps
+                    
+                    if step:
+                        # Track progress for this step
+                        if step not in self._step_progress:
+                            self._step_progress[step] = {
+                                'processed': 0,
+                                'total': total if total > 0 else 1,
+                                'sub_step': sub_step
+                            }
                         
+                        step_info = self._step_progress[step]
+                        if total > 0:
+                            step_info['total'] = total
+                        if processed >= 0:
+                            step_info['processed'] = processed
+                            
+                        # Calculate step progress
+                        self._current_step_progress = step_info['processed'] / step_info['total']
+                        
+                        # Calculate overall progress
+                        if self._total_steps > 0:
+                            total_progress = sum(
+                                info['processed'] / info['total'] 
+                                for info in self._step_progress.values()
+                            ) / self._total_steps
+                            
+                            self._update_progress(total_progress)
+                    
+                elif update_type == 'result':
+                    logger.debug(f"Processing result update - step: {step} - data: {pipeline_data}")
+                    
+                    # Handle validation updates
+                    if isinstance(pipeline_data, dict) and 'validation' in pipeline_data:
+                        validation = pipeline_data.get('validation')
+                        logger.debug(f"Found validation update: {validation} {update}")
+                        # Try to get result ID from the data
+                        metadata = update.get('metadata', {})
+                        result_id = (metadata.get('article_id') or 
+                                    pipeline_data.get('url') or 
+                                    pipeline_data.get('title') or 
+                                    pipeline_data.get('id'))
+                        
+                        logger.debug(f"Found result ID for validation: {result_id}")
+                        
+                        if result_id and result_id in self._results:
+                            logger.debug(f"Processing validation update for {result_id}: {validation}")
+                            
+                            # Update validation status and result data
+                            self._results[result_id].update(pipeline_data)
+                            
+                            # Remove if explicitly invalid
+                            if validation.get('is_valid') is False:
+                                logger.debug(f"Removing invalid result {result_id}")
+                                if result_id in self._result_containers:
+                                    self._result_containers[result_id].empty()
+                                    del self._result_containers[result_id]
+                                del self._results[result_id]
+                                logger.debug(f"Removed invalid result: {result_id}")
+                            else:
+                                # Update display for non-invalid results
+                                if result_id in self._result_containers:
+                                    self._display_result(
+                                        {'data': self._results[result_id]},
+                                        self._result_containers[result_id]
+                                    )
+                                    logger.debug(f"Updated display for result: {result_id}")
+                        else:
+                            logger.debug(f"No matching result found for validation update: {result_id}")
+                    
+                    # Handle non-validation updates
+                    if pipeline_data:
+                        # Process the pipeline data
+                        if isinstance(pipeline_data, dict):
+                            # Extract any results from pipeline data
+                            results = []
+                            if 'results' in pipeline_data:
+                                results = pipeline_data['results']
+                            elif 'original_data' in pipeline_data and isinstance(pipeline_data['original_data'], dict):
+                                results = pipeline_data['original_data'].get('results', [])
+                            elif pipeline_data.get('metadata') or pipeline_data.get('url') or pipeline_data.get('title'):
+                                # This looks like a record itself
+                                results = [pipeline_data]
+                            
+                            # Process each result that has an ID
+                            for result in results:
+                                if not isinstance(result, dict):
+                                    continue
+                                    
+                                # Get result ID
+                                metadata = result.get('metadata', {})
+                                result_id = metadata.get('article_id') or result.get('url') or result.get('title') or result.get('id')
+                                
+                                if not result_id:
+                                    continue
+                                
+                                # Create or update result
+                                if result_id not in self._results:
+                                    self._results[result_id] = result
+                                    with results_area:
+                                        self._result_containers[result_id] = st.empty()
+                                    logger.debug(f"Added new result: {result_id}")
+                                else:
+                                    # Don't update if already marked invalid
+                                    existing_validation = self._results[result_id].get('validation', {})
+                                    if existing_validation.get('is_valid') is False:
+                                        logger.debug(f"Skipping update for invalid result: {result_id}")
+                                        continue
+                                        
+                                    self._results[result_id].update(result)
+                                    logger.debug(f"Updated existing result: {result_id}")
+                                
+                                # Display the result
+                                if result_id in self._result_containers:
+                                    self._display_result(
+                                        {'data': self._results[result_id]},
+                                        self._result_containers[result_id]
+                                    )
+                            
+                            # Update progress and status
+                            self._progress = min(self._progress + 0.05, 0.95)
+                            self._update_progress(self._progress)
+                            
+                            # Only count results that aren't explicitly invalid
+                            valid_count = len([r for r in self._results.values() 
+                                             if r.get('validation', {}).get('is_valid') is not False])
+                            self._update_status(step=update.get('step', ''), count=valid_count)
+                        
+                elif update_type == 'error':
+                    error_msg = update.get('data', 'Unknown error')
+                    st.error(f"❌ Error: {error_msg}")
+                    logger.error(f"Pipeline error: {error_msg}")
+                    
+            # Complete
+            valid_count = len([r for r in self._results.values() 
+                             if r.get('validation', {}).get('is_valid') is not False])
+            self._update_status(step="Complete", count=valid_count, complete=True)
+            self._update_progress(1.0)
+                
         except Exception as e:
-            error_msg = f"❌ Error during search: {str(e)}"
-            st.error(error_msg)
-            progress_placeholder.write(error_msg)
+            logger.error(f"Error streaming results: {str(e)}", exc_info=True)
+            st.error(f"❌ Error: {str(e)}")
+            
+        finally:
+            # Clear progress
+            self.progress_bar.empty()
 
     def clear_results(self):
         """Clear the current results."""
@@ -294,22 +397,18 @@ class StreamInterface:
         
     def get_results(self):
         """Get current results, filtered and sorted."""
-        if not hasattr(st.session_state, 'results') or not st.session_state.results:
-            return []
-            
-        # Filter and sort results, ensuring uniqueness by title
-        seen_titles = set()
-        valid_results = []
+        # Filter out invalid results
+        valid_results = [
+            result for result in self._results.values()
+            if not result.get('validation') or result.get('validation', {}).get('is_valid') is not False
+        ]
         
-        for item in st.session_state.results:
-            if isinstance(item, dict) and 'title' in item and 'score' in item:
-                title = item['title']
-                if title not in seen_titles:
-                    seen_titles.add(title)
-                    valid_results.append(item)
-        
-        # Sort by score and return top results
-        return sorted(valid_results, key=lambda x: float(x['score']), reverse=True)
+        # Sort by score if available
+        return sorted(
+            valid_results,
+            key=lambda x: float(x.get('score', 0)),
+            reverse=True
+        )
 
     def add_results(self, results):
         """Add results to session state."""
@@ -317,132 +416,6 @@ class StreamInterface:
             st.session_state.results = []
         st.session_state.results.extend(results)
 
-    async def handle_batch_search(self, search_engine, queries: List[str], min_score: float = 0.8):
-        """Handle batch search queries with parallel processing and streaming updates."""
-        try:
-            # Initialize progress tracking
-            progress = {query: {"status": "pending", "results": []} for query in queries}
-            
-            # Initialize progress display
-            self.add_message("Processing queries in parallel...")
-            
-            queries_completed = 0
-            total_queries = len(queries)
-            
-            # Process queries with parallel streaming updates
-            async def process_query(query: str):
-                nonlocal queries_completed
-                try:
-                    async for update in search_engine.search(query, min_score, self):
-                        if 'stream' in update:
-                            self.add_message(f"[{query}] {update['stream']}")
-                        if 'data' in update:
-                            progress[query]["results"] = update['data']
-                            progress[query]["status"] = "completed"
-                            queries_completed += 1
-                            
-                            # Update progress bar
-                            current_progress = queries_completed / total_queries
-                            self.add_message(f"Completed {queries_completed}/{total_queries} queries")
-                            
-                except Exception as e:
-                    progress[query]["status"] = "failed"
-                    progress[query]["error"] = str(e)
-                    self.add_message(f"❌ Error processing query '{query}': {str(e)}")
-            
-            # Create tasks for all queries
-            tasks = [process_query(query) for query in queries]
-            await asyncio.gather(*tasks)
-            
-            # Combine results from all completed queries
-            all_results = []
-            for query, query_progress in progress.items():
-                if query_progress["status"] == "completed":
-                    all_results.extend(query_progress["results"])
-            
-            # Sort combined results by score
-            st.session_state.results = sorted(all_results, key=lambda x: x.get('score', 0), reverse=True)
-            
-            # Display final results
-            self._display_results()
-            
-        except Exception as e:
-            logger.error(f"Error in batch search: {str(e)}", exc_info=True)
-            self.add_message(f"❌ Error in batch search: {str(e)}")
-
-    async def handle_search(self, query: str):
-        """Handle search request and display results."""
-        if not query:
-            return
-            
-        # Show query header
-        self.add_message(f"🔍 Query: {query}")
-        
-        try:
-            async with SearchEngine(min_score=self.min_score) as engine:
-                async for update in engine.search(query):
-                    progress = update.get('progress', 0)
-                    status = update.get('status', '')
-                    stream = update.get('stream', '')
-                    
-                    # Update stats based on stream message
-                    if 'stream' in update:
-                        self.add_message(stream)
-                    
-                    # Display results if any
-                    if 'results' in update:
-                        st.session_state.results = update['results']
-                        self._display_results()
-                        
-        except Exception as e:
-            logger.error(f"Error in search: {str(e)}", exc_info=True)
-            self.add_message(f"❌ Error in search: {str(e)}")
-
-    def visualize_search_graph(self, nodes: List[Dict], edges: List[Dict]):
-        """Create an interactive force-directed graph of search results"""
-        fig = go.Figure()
-        
-        # Add nodes
-        node_x = [node['x'] for node in nodes]
-        node_y = [node['y'] for node in nodes]
-        
-        fig.add_trace(go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode='markers+text',
-            marker=dict(
-                size=20,
-                color=[self.theme['accent1'] if node['type'] == 'query' else self.theme['accent2'] for node in nodes],
-                line=dict(width=2, color=self.theme['accent3'])
-            ),
-            text=[node['label'] for node in nodes],
-            hoverinfo='text',
-            name='nodes'
-        ))
-        
-        # Add edges
-        for edge in edges:
-            fig.add_trace(go.Scatter(
-                x=[nodes[edge['source']]['x'], nodes[edge['source']]['x']],
-                y=[nodes[edge['source']]['y'], nodes[edge['source']]['y']],
-                mode='lines',
-                line=dict(width=1, color=self.theme['text']),
-                hoverinfo='none',
-                showlegend=False
-            ))
-            
-        fig.update_layout(
-            plot_bgcolor=self.theme['background'],
-            paper_bgcolor=self.theme['background'],
-            showlegend=False,
-            hovermode='closest',
-            margin=dict(b=20,l=5,r=5,t=40),
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            font=dict(color=self.theme['text'])
-        )
-        
-        self.container.plotly_chart(fig, use_container_width=True)
 
     def get_export_data(self, results: List[Dict]) -> str:
         """Generate markdown export data from results."""
@@ -534,35 +507,34 @@ class StreamInterface:
         
         return fig
 
-    def _display_results(self, container: Any = None):
-        """Display search results."""
-        if container is None:
-            container = self.results_container
-
-        results = self.get_results()
-        if not results:
-            container.warning("No results to display.")
-            return
-
-        # Add timeline visualization
-        container.markdown("### 📈 Results Timeline")
-        timeline_fig = self.create_timeline_visualization(results)
-        container.plotly_chart(timeline_fig, use_container_width=True)
-
-        # Display individual results
-        container.markdown("### 📚 Detailed Results")
-        for result in results:
-            title = result['title']
-            score = float(result['score'])
+    def _display_result(self, result: Dict[str, Any], container: Optional[st.container] = None) -> None:
+        """Display a single search result."""
+        data = result.get('data', {})
+        title = data.get('title', 'Untitled')
+        url = data.get('url', '')
+        score = data.get('score', 0)
+        metadata = data.get('metadata', {})
+        validation = data.get('validation', {})
+        
+        # Create markdown for result
+        markdown = f"### [{title}]({url.replace(' ', '%20')})\n"
+        if metadata:
+            markdown += f"**ID:** {metadata.get('article_id', 'Unknown')}\n"
             
-            with container.expander(f"{title} (Score: {score:.2f})"):
-                if 'content' in result:
-                    container.markdown(result['content'])
-                if 'literature_review' in result and result['literature_review']:
-                    container.markdown("\n### Literature Review")
-                    container.markdown(result['literature_review'])
-                if 'url' in result:
-                    container.markdown(f"\nSource: [{result['url']}]({result['url']})")
+        # Add validation status if available
+        if validation:
+            is_valid = validation.get('is_valid', False)
+            explanation = validation.get('explanation', '')
+            status = "✅ Valid" if is_valid else "❌ Invalid"
+            markdown += f"**Validation:** {status}\n"
+            if explanation:
+                markdown += f"**Explanation:** {explanation}\n"
+        
+        # Display the result
+        if container:
+            container.markdown(markdown)
+        else:
+            st.markdown(markdown)
 
     def show_export_button(self):
         """Show the export button."""
