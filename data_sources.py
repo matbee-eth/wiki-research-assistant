@@ -205,7 +205,7 @@ class DataSources:
     def _get_cached_article(self, article_id: str) -> Optional[Dict[str, Any]]:
         """Get article from cache."""
         return self.cache_manager.get_cached_article(article_id)
-        
+    
     async def _fetch_wikipedia_article(self, article_id: str) -> Optional[Dict[str, Any]]:
         """
         Fetch article content from Wikipedia.
@@ -259,7 +259,7 @@ class DataSources:
                 search_config = config or {}
                 min_score = search_config.get('min_score', 0.7)
                 min_percentile = search_config.get('min_percentile', 0.0)
-                limit = search_config.get('limit', 10)
+                limit = search_config.get('limit', 2000)
                 
                 if self.embeddings is None:
                     self.initialize()
