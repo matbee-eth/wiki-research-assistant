@@ -118,6 +118,7 @@ class SearchRequestProcessor:
                     'type': 'error',
                     'message': 'No query provided'
                 }
+                st.session_state.processing = False
                 return
                 
             # Extract configuration parameters
@@ -126,8 +127,6 @@ class SearchRequestProcessor:
                 'max_results': request.get('max_results', 10),
             }
             
-            # logger.info(f"Processing search request: {query} with config: {config}")
-            
             # Create pipeline with config
             self.pipeline = create_pipeline(self.llm_manager, config)
             self.pipeline.append(query)
@@ -135,13 +134,16 @@ class SearchRequestProcessor:
             async for processed_result in self.pipeline.process_queue():
                 logger.info(f"Processed result: {processed_result} - {processed_result.get('step')}")
                 yield processed_result
+            
+            # Set processing to False after pipeline finishes
+            st.session_state.processing = False
                 
         except Exception as e:
-            # logger.error(f"Error processing search request: {str(e)}", exc_info=True)
             yield {
                 'type': 'error',
                 'message': f"Error processing request: {str(e)}"
             }
+            st.session_state.processing = False
 
 async def main():
     st.set_page_config(page_title="Research Assistant", layout="wide")

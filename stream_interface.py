@@ -622,11 +622,11 @@ class StreamInterface:
                 parts.append('<div class="claim-box">')
                 parts.append('<div class="claim-label">Question/Claim</div>')
                 parts.append(f'<div class="claim-text">{claim}</div>')
-                if validation_rate is not None:
-                    validation_color = '#4CAF50' if validation_rate >= 80 else '#FFC107' if validation_rate >= 50 else '#FF5722'
-                    parts.append(f'<div class="validation-rate" style="color: {validation_color}">')
-                    parts.append(f'Validation Rate: {validation_rate:.0f}%')
-                    parts.append('</div>')
+                parts.append('</div>')
+            if validation_rate is not None:
+                validation_color = '#4CAF50' if validation_rate >= 80 else '#FFC107' if validation_rate >= 50 else '#FF5722'
+                parts.append(f'<div class="validation-rate" style="color: {validation_color}">')
+                parts.append(f'Validation Rate: {validation_rate:.0f}%')
                 parts.append('</div>')
             parts.append('</div>')
             
