@@ -1,17 +1,11 @@
 # data_sources.py
 
-import os
-import json
-import string
 import aiohttp
-import asyncio
 import re
-import html
 import mwparserfromhell
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from txtai.embeddings import Embeddings
 import logging
-from creole import creole2html
 
 # Configure logging
 logger = logging.getLogger(__name__)
