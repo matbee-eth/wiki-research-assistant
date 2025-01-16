@@ -11,7 +11,7 @@ import pandas as pd
 from pathlib import Path
 import base64
 from pipeline import ExecutionMode, Pipeline, batch
-from wiki_research_assistant.llm_manager import LLMManager
+from llm_manager import LLMManager
 from pipelines.query_processor import QueryProcessor
 from pipelines.fact_checker import FactChecker
 from data_sources import DataSources
