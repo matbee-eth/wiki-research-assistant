@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import asyncio
 import datetime
 import base64
+import html
 
 if TYPE_CHECKING:
     from search_engine import SearchEngine
@@ -276,14 +277,14 @@ class StreamInterface:
                     for current_step in self._step_order:
                         # Either create new expander or reuse existing one
                         if current_step in self._step_expanders:
-                            self._step_expanders[current_step].label = f"Results ({len(update.get('data', []))} items)"
+                            self._step_expanders[current_step].label = f"Results"
                             # Collapse previous steps, expand current step
                             self._step_expanders[current_step].expanded = (current_step == step)
                         else:
                             main_container.markdown(f"#### Step: {current_step}")
                             # Only expand the current step
                             self._step_expanders[current_step] = main_container.expander(
-                                f"Results ({len(update.get('data', []))} items)", 
+                                "Results", 
                                 expanded=(current_step == step)
                             )
 
@@ -367,10 +368,11 @@ class StreamInterface:
                 self._update_status(
                     step=f"{step} ({len(update.get('data', []))} items)",
                     count=result_count,
-                    complete=update.get('is_final', False)
+                    complete=update.get('is_final', False) and update.get('progress', 0) == 1.0
                 )
                 
-                if update.get('is_final', False):
+                if update.get('is_final', False) and update.get('progress', 0) == 1.0:
+                    # Step is complete
                     logger.info(f"Step {step} completed")
                     self.add_message(f"✅ **Step completed** with {self._step_counts[step]} items processed", step)
                     # Collapse the expander when step is complete
@@ -578,6 +580,7 @@ class StreamInterface:
         url = data.get('url', '')
         score = data.get('score', 0)
         document = data.get('document', '')
+        summary = data.get('summary', '')
         query = data.get('query', '')
         claim = data.get('claim', '')
         article_id = data.get('article_id', '')
@@ -615,7 +618,7 @@ class StreamInterface:
                 parts.append('<div class="query-label">Search Query</div>')
                 parts.append(f'<div class="query-text">{query}</div>')
                 parts.append('</div>')
-            if claim:
+            if claim and claim is str:
                 parts.append('<div class="claim-box">')
                 parts.append('<div class="claim-label">Question/Claim</div>')
                 parts.append(f'<div class="claim-text">{claim}</div>')
@@ -628,7 +631,12 @@ class StreamInterface:
             parts.append('</div>')
             
         # Document content section
-        if document:
+        if summary:
+            parts.append('<div class="summary-section">')
+            parts.append('<div class="summary-label">Summary</div>')
+            parts.append(f'<div class="summary-text">{summary}</div>')
+            parts.append('</div>')
+        elif document:
             parts.append('<div class="document-section">')
             parts.append('<div class="document-content">')
             parts.append(document)

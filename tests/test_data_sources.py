@@ -82,3 +82,72 @@ async def test_get_full_wikipedia_page_categories():
         ]
         found_category = any(cat in result["categories"] for cat in expected_categories)
         assert found_category, "Expected category not found in article categories"
+
+@pytest.mark.asyncio
+async def test_wiki_rendering():
+    """Test wiki markup rendering functionality."""
+    data_sources = DataSources()
+    
+    # Test sample with various wiki markup elements
+    wiki_content = """
+==Introduction==
+This is a '''bold''' and ''italic'' text example.
+
+===Section 1===
+* List item 1
+* List item 2
+# Ordered item 1
+# Ordered item 2
+
+====Subsection====
+Here's a [[Wikipedia|link]] and an external [https://example.com Example Link].
+
+{{Template|param=value}}
+<ref>Reference text</ref>
+
+==References==
+Some text with a <ref>Another reference</ref> and a {{citation needed}} template.
+"""
+    
+    # Create a mock article data structure
+    article_data = {
+        'content': wiki_content,
+        'sections': [
+            {
+                'title': 'Test Section',
+                'content': "This is a '''test''' section with a [[link]]",
+                'level': 2
+            }
+        ]
+    }
+    
+    # Render the content
+    rendered = data_sources.render_wiki_content(article_data)
+    
+    print("\nTESTING WIKI RENDERING")
+    print("="*120)
+    print("\nOriginal Wiki Content:")
+    print("-"*80)
+    print(wiki_content)
+    print("\nRendered HTML Content:")
+    print("-"*80)
+    print(rendered['content'])
+    print("\nRendered Section Content:")
+    print("-"*80)
+    print(rendered['sections'][0]['content'])
+    
+    # Verify the rendering quality
+    assert '<h2>Introduction</h2>' in rendered['content'], "Header not properly rendered"
+    assert '<strong>' in rendered['content'], "Bold text not properly rendered"
+    assert '<em>' in rendered['content'], "Italic text not properly rendered"
+    assert '<ul>' in rendered['content'], "Unordered list not properly rendered"
+    assert '<ol>' in rendered['content'], "Ordered list not properly rendered"
+    assert '<li>' in rendered['content'], "List items not properly rendered"
+    assert '<a href=' in rendered['content'], "Links not properly rendered"
+    assert '{{Template|param=value}}' not in rendered['content'], "Template not properly removed"
+    assert '<ref>' not in rendered['content'], "References not properly removed"
+    
+    # Verify section rendering
+    section_content = rendered['sections'][0]['content']
+    assert '<strong>test</strong>' in section_content, "Section formatting not properly rendered"
+    assert '<a href=' in section_content, "Section links not properly rendered"

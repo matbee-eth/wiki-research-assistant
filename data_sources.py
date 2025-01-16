@@ -7,10 +7,11 @@ import aiohttp
 import asyncio
 import re
 import html
-from typing import Dict, List, Any, Optional, Union
+import mwparserfromhell
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from txtai.embeddings import Embeddings
 import logging
-from typing import AsyncGenerator
+from creole import creole2html
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -401,13 +402,17 @@ class DataSources:
             config: Optional configuration parameters including min_score
             
         Yields:
-            Search results with metadata
+            Search results with metadata including full article content and sections
         """
         config = config or {}
         min_score = config.get('min_score', 0.7)
         seen_articles = set()
         
         try:
+            # Ensure session is initialized
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            
             for query_item in queries:
                 if not query_item:
                     logger.error("No query provided")
@@ -444,26 +449,162 @@ class DataSources:
                         continue
                     seen_articles.add(article_id)
                     
-                    # Get article data from cache or fetch
-                    article_data = self._get_cached_article(article_id)
-                    if not article_data:
-                        article_data = await self._fetch_wikipedia_article(article_id)
-                        if article_data:
-                            self._cache_article(article_id, article_data)
-                    
-                    if not article_data:
-                        continue
+                    try:
+                        # Check cache first
+                        article_data = self._get_cached_article(article_id)
+                        if not article_data:
+                            # Fetch and cache if not found
+                            article_data = await self.get_full_wikipedia_page(article_id)
+                            if article_data:
+                                self._cache_article(article_id, article_data)
                         
-                    yield {
-                        **query_item,
-                        'article_id': article_id,
-                        'title': article_data.get('title', ''),
-                        'url': f"https://en.wikipedia.org/wiki/{article_id}",
-                        'score': score,
-                        'document': article_data.get('text', ''),
-                        'summary': article_data.get('summary', '')
-                    }
+                        if not article_data:
+                            continue
+                        
+                        # Clean and render the wiki content
+                        article_data = self.render_wiki_content(article_data)
+                        
+                        # Extract a summary from the introduction section
+                        intro_section = next((s for s in article_data["sections"] if s["level"] == 0 and s["title"] == "Introduction"), None)
+                        summary = intro_section["content"] if intro_section else ""
+                        
+                        # Clean up the summary by removing templates
+                        summary = re.sub(r'\{\{[^}]*\}\}', '', summary)  # Remove templates
+                        summary = re.sub(r'\[\[[^\]]*\|([^\]]*)\]\]', r'\1', summary)  # Clean up links
+                        summary = re.sub(r'\[\[([^\]]*)\]\]', r'\1', summary)  # Clean up remaining links
+                        summary = re.sub(r'<[^>]+>', '', summary)  # Remove HTML tags
+                        summary = re.sub(r'\s+', ' ', summary).strip()  # Clean up whitespace
+                        
+                        yield {
+                            **query_item,
+                            'article_id': article_id,
+                            'title': article_data['title'],
+                            'url': article_data['url'],
+                            'score': score,
+                            'document': article_data['content'],
+                            'summary': summary,
+                            'sections': article_data['sections'],
+                            'categories': article_data['categories'],
+                            'timestamp': article_data['timestamp']
+                        }
+                    except ValueError as e:
+                        logger.warning(f"Could not fetch article {article_id}: {str(e)}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error processing article {article_id}: {str(e)}", exc_info=True)
+                        continue
                     
         except Exception as e:
             logger.error(f"Error in stream_search_wikipedia: {str(e)}", exc_info=True)
             raise
+
+    def _wiki_to_html(self, text: str) -> str:
+        """
+        Convert MediaWiki markup to HTML using mwparserfromhell.
+        
+        Args:
+            text: Raw MediaWiki markup text
+            
+        Returns:
+            HTML-formatted text
+        """
+        if not text:
+            return ""
+            
+        # Parse the wikitext
+        wikicode = mwparserfromhell.parse(text)
+        
+        # Convert to HTML
+        html_parts = []
+        for node in wikicode.nodes:
+            if isinstance(node, mwparserfromhell.nodes.heading.Heading):
+                level = node.level
+                title = str(node.title).strip()
+                html_parts.append(f"<h{level}>{title}</h{level}>")
+            elif isinstance(node, mwparserfromhell.nodes.text.Text):
+                html_parts.append(str(node))
+            elif isinstance(node, mwparserfromhell.nodes.wikilink.Wikilink):
+                title = str(node.title)
+                text = str(node.text) if node.text else title
+                html_parts.append(f'<a href="{title}">{text}</a>')
+            elif isinstance(node, mwparserfromhell.nodes.external_link.ExternalLink):
+                url = str(node.url)
+                text = str(node.title) if node.title else url
+                html_parts.append(f'<a href="{url}">{text}</a>')
+            elif isinstance(node, mwparserfromhell.nodes.tag.Tag):
+                if node.tag == 'ref':
+                    continue  # Skip references
+                html_parts.append(str(node))
+            elif isinstance(node, mwparserfromhell.nodes.template.Template):
+                continue  # Skip templates
+            else:
+                html_parts.append(str(node))
+        
+        html_text = ''.join(html_parts)
+        
+        # Convert remaining wiki markup
+        html_text = re.sub(r"'''(.*?)'''", r'<strong>\1</strong>', html_text)  # Bold
+        html_text = re.sub(r"''(.*?)''", r'<em>\1</em>', html_text)  # Italic
+        
+        # Convert lists
+        lines = html_text.split('\n')
+        in_list = False
+        list_type = None
+        processed_lines = []
+        
+        for line in lines:
+            if line.startswith('* '):
+                if not in_list or list_type != 'ul':
+                    if in_list:
+                        processed_lines.append(f'</{list_type}>')
+                    processed_lines.append('<ul>')
+                    in_list = True
+                    list_type = 'ul'
+                processed_lines.append(f'<li>{line[2:]}</li>')
+            elif line.startswith('# '):
+                if not in_list or list_type != 'ol':
+                    if in_list:
+                        processed_lines.append(f'</{list_type}>')
+                    processed_lines.append('<ol>')
+                    in_list = True
+                    list_type = 'ol'
+                processed_lines.append(f'<li>{line[2:]}</li>')
+            else:
+                if in_list:
+                    processed_lines.append(f'</{list_type}>')
+                    in_list = False
+                processed_lines.append(line)
+        
+        if in_list:
+            processed_lines.append(f'</{list_type}>')
+        
+        html_text = '\n'.join(processed_lines)
+        
+        # Clean up whitespace
+        html_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', html_text)
+        html_text = re.sub(r'  +', ' ', html_text)
+        
+        return html_text.strip()
+        
+    def render_wiki_content(self, content: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Render MediaWiki content as HTML using mwparserfromhell.
+        
+        Args:
+            content: Dictionary containing Wikipedia article data
+            
+        Returns:
+            Dictionary with HTML-rendered content ready for display
+        """
+        if not content:
+            return content
+            
+        # Convert main content to HTML
+        content['content'] = self._wiki_to_html(content['content'])
+        
+        # Convert each section's content
+        if 'sections' in content:
+            for section in content['sections']:
+                section['content'] = self._wiki_to_html(section['content'])
+                
+        return content

@@ -142,7 +142,7 @@ Claim: {claim}
         
         logger.debug(f"Validating {len(items)} claims")
         for item in items:
-            document = item.get('document', '')
+            document = item.get('summary', '')
             if not document:
                 logger.error("No document provided for validation")
                 continue
