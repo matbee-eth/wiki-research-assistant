@@ -80,7 +80,7 @@ class LLMManager:
             self.logger.error(f"Error getting JSON response: {str(e)}")
             return {}
 
-    async def get_string_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.9, stream: bool = False) -> str:
+    async def get_string_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.3, stream: bool = False) -> str:
         """
         Get string response from LLM.
         

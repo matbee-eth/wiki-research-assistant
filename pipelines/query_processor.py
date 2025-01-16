@@ -14,20 +14,28 @@ class QueryProcessor:
     def __init__(self, llm_manager: LLMManager):
         self.llm_manager = llm_manager
 
-    async def _decompose_single_query(self, query: string, config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def _decompose_single_query(self, item: Dict[str, Any], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Decompose a single query into multiple sub-queries."""
-        logger.info(f"Decomposing query: {query}")
+        # logger.info(f"Decomposing query: {item.get('query', '')}")
         
-        prompt = """Break down this research query into focused sub-queries. Return a JSON array of strings, where each string is a focused sub-query that explores a specific aspect.
+        prompt = """Break down this research query into focused semantic search queries.
+        Return a JSON array of strings, where each string is a focused sub-query that explores a specific aspect.
+        Adhere to the analysis provided, such as topic, time period, geographic scope, and evidence types.
+        Consider variations of the original query that might yield more relevant results.
 
+Analysis of query: "{}"
 Original query: "{}"
 
-Respond with only a JSON array of strings.""".format(query)
+Respond with only a JSON array of strings.""".format(item.get('analysis', ''), item.get('query', ''))
         
         response = await self.llm_manager.get_string_response(prompt=prompt)
         sub_queries = await self._parse_json_response(response)
-        
-        return sub_queries
+        # Map each sub-query to the same data in 'item' but update the 'query' field
+        decomposed_items = [
+            {**item, 'query': sub_query}
+            for sub_query in sub_queries
+        ]
+        return decomposed_items
 
     async def decompose_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> List[Dict[str, Any]]:
         """Map each query to multiple sub-queries."""
@@ -42,9 +50,9 @@ Respond with only a JSON array of strings.""".format(query)
                 
         return processed_results
 
-    async def _enrich_single_query(self, query: string, config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def _enrich_single_query(self, item: Dict[str, Any], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Enrich a single query into multiple variations."""
-        logger.info(f"Enriching query: {query}")
+        # logger.info(f"Enriching query: {item.get('query', '')}")
         
         prompt = """As an expert in semantic search and knowledge graphs, analyze this query and generate variations of it to explore different aspects.
         Consider historical, cultural, and domain-specific relationships.
@@ -52,7 +60,7 @@ Respond with only a JSON array of strings.""".format(query)
 
 Original query: "{}"
 
-Respond with only a JSON array of strings.""".format(query)
+Respond with only a JSON array of strings.""".format(item.get('query', ''))
         
         response = await self.llm_manager.get_string_response(prompt=prompt)
         enriched_queries = await self._parse_json_response(response)
@@ -71,7 +79,7 @@ Respond with only a JSON array of strings.""".format(query)
                 
         return processed_results
 
-    async def _analyze_single_query(self, query: string, config: Dict[str, Any] = None):
+    async def _analyze_single_query(self, query: Dict[str, Any], config: Dict[str, Any] = None):
         """
         Analyze a single query to identify key components.
         Internal helper method for analyze_queries.
@@ -111,17 +119,20 @@ Respond with only a JSON array of strings.""".format(query)
         
         raw_response = await self.llm_manager.get_string_response(prompt=prompt)
         analysis = await self._parse_json_response(raw_response)
-        logger.info(f"Query analysis for {query}: {analysis}")
+        # logger.info(f"Query analysis for {query}: {analysis}")
         
         # Ensure analysis is a list
         if isinstance(analysis, dict):
             analysis = [analysis]
         elif not isinstance(analysis, list):
             analysis = [analysis] if analysis else []
-            
-        claims = [claim for item in analysis for claim in item.get('claims_to_verify', [])]
-        return claims
-
+        
+        # Map each entry in the analysis list to a dictionary with query and analysis
+        mapped_results = [{"query": query, "analysis": entry} for entry in analysis]
+        
+        return mapped_results
+        
+    
     async def analyze_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> List[Dict[str, Any]]:
         """
         Analyze multiple queries to identify key components in parallel.
@@ -133,17 +144,13 @@ Respond with only a JSON array of strings.""".format(query)
         Returns:
             List of dictionaries containing query analysis and metadata
         """
-        logger.info(f"Analyzing {len(data_items)} queries")
+        # logger.info(f"Analyzing {len(data_items)} queries")
         tasks = [self._analyze_single_query(item, config) for item in data_items]
         results = await asyncio.gather(*tasks, return_exceptions=False)
+        flattened_results = [item for sublist in results for item in sublist]
         
         # Handle any exceptions
-        processed_results = []
-        processed_results.extend(data_items)
-        for result in results:
-            processed_results.extend(result)
-
-        return processed_results
+        return flattened_results
 
     async def _parse_json_response(self, response: str) -> Union[List[str], Dict[str, Any]]:
         """Parse a JSON response from the LLM."""

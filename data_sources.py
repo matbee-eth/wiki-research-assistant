@@ -246,20 +246,35 @@ class DataSources:
             logger.error(f"Error fetching article {article_id}: {str(e)}")
             return None
             
-    async def stream_search_wikipedia(self, data: List[string], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def stream_search_wikipedia(self, queries: List[str], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Search Wikipedia for relevant articles based on queries.
+        
+        Args:
+            queries: List of search queries
+            config: Optional configuration parameters including min_score
+            
+        Returns:
+            List of search results with metadata
+        """
+        config = config or {}
+        min_score = config.get('min_score', 0.7)
         results = []
         seen_articles = set()
         
         try:
-            for query in data:
+            for query_item in queries:
+                if not query_item:
+                    logger.error("No query provided")
+                    continue
+                
+                query = query_item.get('query', '')
                 if not query:
                     logger.error("No query provided")
                     continue
-                    
                 search_config = config or {}
-                min_score = search_config.get('min_score', 0.7)
                 min_percentile = search_config.get('min_percentile', 0.0)
-                limit = search_config.get('limit', 2000)
+                limit = search_config.get('limit', 100)
                 
                 if self.embeddings is None:
                     self.initialize()
@@ -293,6 +308,7 @@ class DataSources:
                         continue
                         
                     search_result = {
+                        **query_item,
                         'article_id': article_id,
                         'title': article_data.get('title', ''),
                         'url': f"https://en.wikipedia.org/wiki/{article_id}",

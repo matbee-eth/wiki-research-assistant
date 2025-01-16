@@ -59,12 +59,13 @@ def export_results(results: List[dict]):
     href = f'<a href="data:file/csv;base64,{b64}" download="search_results.csv" target="_blank">Download Results</a>'
     st.markdown(href, unsafe_allow_html=True)
 
-def create_pipeline(llm_manager: LLMManager) -> Pipeline:
+def create_pipeline(llm_manager: LLMManager, config: Dict[str, Any] = None) -> Pipeline:
     """
     Create and configure the search pipeline.
     
     Args:
         llm_manager: LLM manager instance for query processing
+        config: Configuration parameters for pipeline steps
         
     Returns:
         Configured pipeline instance
@@ -75,31 +76,17 @@ def create_pipeline(llm_manager: LLMManager) -> Pipeline:
     data_sources = DataSources()
     data_sources.initialize()  # Ensure embeddings are initialized
     
+    # Create pipeline with initial config
+    pipeline = Pipeline(config=config or {})
 
-    # Create pipeline
-    pipeline = Pipeline()
-    
     # Add steps with array-based methods
     pipeline.add_map("analyze", query_processor.analyze_queries)
     pipeline.add_map("decompose", query_processor.decompose_queries)
-    pipeline.add_map("enrich", query_processor.enrich_queries)
+    # pipeline.add_map("enrich", query_processor.enrich_queries)
     
-    # Create an async wrapper for stream_search_wikipedia to handle arrays
-    async def search_batch(items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        results = []
-        for item in items:
-            # Collect all results from the generator
-            item_results = []
-            async for result in data_sources.stream_search_wikipedia(item, config):
-                item_results.extend(result.get('results', []))
-            # Update the item with all collected results
-            item['results'] = item_results
-            results.append(item)
-        return results
-    
-    pipeline.add_map("search", search_batch)
-    pipeline.add_map("generate_claims", fact_checker.generate_claims)
-    pipeline.add_filter("validate_claims", fact_checker.validate_claims)  # Changed to filter
+    pipeline.add_map("search", data_sources.stream_search_wikipedia, execution_mode=ExecutionMode.ALL)
+    # pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.ALL)
+    pipeline.add_filter("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.ALL)
     
     return pipeline
 
@@ -113,7 +100,6 @@ class SearchRequestProcessor:
         """Initialize async resources."""
         self.llm_manager = LLMManager()
         await self.llm_manager.__aenter__()
-        self.pipeline = create_pipeline(self.llm_manager)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -133,80 +119,92 @@ class SearchRequestProcessor:
                 }
                 return
                 
-            min_score = request.get('min_score', 0.7)
-            logger.info(f"Processing search request: {query}")
+            # Extract configuration parameters
+            config = {
+                'min_score': request.get('min_score', 0.7),
+                'max_results': request.get('max_results', 10),
+            }
             
-            # Structure the initial data for the pipeline as a single-item array
-            pipeline_data = [{
-                'query': query,  # Original query string
-                'config': {     # Configuration for all steps
-                    'min_score': min_score,
-                    'search': {
-                        'min_score': min_score
-                    }
-                },
-                'results': [],  # Will hold search results
-                'metadata': {}  # Additional metadata
-            }]
+            # logger.info(f"Processing search request: {query} with config: {config}")
             
-            # Use the pipeline
-            async for result in self.pipeline.execute(pipeline_data):
-                logger.info(f"Got pipeline result: {result.get('type')} - {result.get('step')}")
-                logger.info(f"Got pipeline result data: {result}")
-                # Extract the first item since we're only processing one query
-                if result.get('data') and isinstance(result['data'], list) and len(result['data']) > 0:
-                    result['data'] = result['data'][0]
-                yield result
+            # Create pipeline with config
+            self.pipeline = create_pipeline(self.llm_manager, config)
+            self.pipeline.append(query)
+            
+            async for processed_result in self.pipeline.process_queue():
+                yield processed_result
                 
         except Exception as e:
-            logger.error(f"Error processing search request: {str(e)}", exc_info=True)
+            # logger.error(f"Error processing search request: {str(e)}", exc_info=True)
             yield {
                 'type': 'error',
                 'message': f"Error processing request: {str(e)}"
             }
 
 async def main():
-    """Main function to run the Streamlit app."""
     st.set_page_config(page_title="Research Assistant", layout="wide")
     st.title("Research Assistant")
+    
+    # Initialize session state
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    if 'messages' not in st.session_state:
+        st.session_state.messages = {}
     
     # Sidebar configuration
     st.sidebar.title("Settings")
     st.sidebar.header("Pipeline Settings")
-    st.sidebar.header("Advanced Settings")
-    min_score = st.sidebar.slider("Minimum Score", 0.0, 1.0, 0.7,
-        help="Minimum relevance score for search results")
+    min_score = st.sidebar.slider("Minimum Score", 0.0, 1.0, 0.72, 0.01)
     
     # <SEARCH>
     query = st.text_area("Enter your research query:", height=100)
-    search_button = st.button("Search")
     
     # <SEARCH STATUS> and <SEARCH RESULTS>
+    col1, col2 = st.columns([3, 1])
     
-    if search_button and query:
-        if not query:
-            st.error("Please enter a query")
-            return
+    with col1:
+        if st.session_state.processing:
+            st.markdown("""
+                <div style="margin-top: 1rem;">
+                    <div class="spinner"></div>
+                    <span style="margin-left: 8px;">Researching...</span>
+                </div>
+            """, unsafe_allow_html=True)
+    
+    with col2:
+        if not st.session_state.processing:
+            if st.button("Search", type="primary", use_container_width=True):
+                st.session_state.processing = True
+    
+    # Show interface if processing
+    if st.session_state.processing and query:
+        try:
+            # Create interface for streaming updates
+            interface = StreamInterface()
             
-        progress_placeholder = st.empty()
-        
-        # Create interface for streaming updates
-        interface = StreamInterface(
-            progress_placeholder=progress_placeholder,
-        )
-        
-        # Run search with progress updates
-        async with SearchRequestProcessor() as processor:
-            await interface.stream_research_progress(
-                processor.process_search_request({
-                    'query': query,
-                    'min_score': min_score
-                })
-            )
+            # Run search with progress updates
+            async with SearchRequestProcessor() as processor:
+                await interface.stream_research_progress(
+                    processor.process_search_request({
+                        'query': query,
+                        'min_score': min_score
+                    })
+                )
+            
+            # Reset processing state when done
+            st.session_state.processing = False
+            
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            st.session_state.processing = False
+            
+    elif st.session_state.processing and not query:
+        st.warning("Please enter a query to start research.")
+        st.session_state.processing = False
 
 async def run_tests() -> bool:
     """Run test suite."""
-    logger.info("Running tests...")
+    # logger.info("Running tests...")
     item_results = []
     config = {
         "limit": 1,
@@ -215,26 +213,26 @@ async def run_tests() -> bool:
 
     # Test LLM Manager initialization
     test_llm = LLMManager()
-    logger.info(" LLM Manager initialization")
+    # logger.info(" LLM Manager initialization")
 
     async with test_llm as llm:
         # Test QueryProcessor
         query_processor = QueryProcessor(llm)
-        logger.info(" QueryProcessor initialization")
+        # logger.info(" QueryProcessor initialization")
 
         # Test DataSources
         test_sources = DataSources()
-        logger.info(" DataSources initialization")
+        # logger.info(" DataSources initialization")
         
         test_sources.initialize()  # Ensure embeddings are initialized
 
         # Test FactChecker
         fact_checker = FactChecker(llm)
-        logger.info(" FactChecker initialization")
+        # logger.info(" FactChecker initialization")
         
         # Test Pipeline creation
         # Implement Pydantic in "Pipeline" class to validate output types
-        logger.info(" Pipeline creation")
+        # logger.info(" Pipeline creation")
         query_generator_pipeline = Pipeline(initial_items=[query], config={"query": query})
         query_generator_pipeline.add_map("analyze", query_processor.analyze_queries)
         # query_generator_pipeline.add_map("decompose", query_processor.decompose_queries)
@@ -251,16 +249,17 @@ async def run_tests() -> bool:
             if (processed_result.get('is_final') == True):
                 item_results.append(processed_result)
 
-        logger.info("All tests passed successfully!")
-        logger.info(f"Item results: {item_results}")
+        # logger.info("All tests passed successfully!")
+        # logger.info(f"Item results: {item_results}")
         return True
 
 if __name__ == "__main__":
-    # Check if we're running under Streamlit
-    if not os.environ.get('STREAMLIT_SCRIPT_MODE'):
-        logger.info("Note: For the full UI experience, run with 'streamlit run app.py'")
-        logger.info("Running in test mode instead...")
-        success = asyncio.run(run_tests())
-        exit(0 if success else 1)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test', action='store_true', help='Run in test mode')
+    args = parser.parse_args()
+
+    if args.test:
+        asyncio.run(run_tests())
     else:
         asyncio.run(main())

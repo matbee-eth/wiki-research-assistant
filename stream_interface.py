@@ -14,202 +14,213 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class StreamInterface:
-    """Interface for streaming research results."""
+    """Interface for streaming updates from the pipeline."""
     
-    def __init__(
-        self, 
-        progress_placeholder: Optional[st.empty] = None,
-        results_container: Optional[st.container] = None
-    ):
+    def __init__(self, *args, **kwargs):
         """Initialize the interface."""
-        # Create status columns
-        cols = st.columns(3)
-        self.step_col = cols[0].empty()
-        self.count_col = cols[1].empty()
-        self.complete_col = cols[2].empty()
-        
-        # Create progress bar
-        self.progress_bar = st.empty()
-        
-        # Create results container
-        self.results_container = st.container()
+        # Initialize session state
+        if "messages" not in st.session_state:
+            st.session_state.messages = {}
         
         # Initialize state
         self._progress = 0.0
-        self._results = {}
-        self._result_containers = {}
+        self._results = {}  # Track results by ID
+        self._result_containers = {}  # Track containers by ID
         self._total_steps = 0
-        self._current_step_index = 0
-        self._current_step_progress = 0.0
         self._current_step = None
+        self._step_counts = {}  # Track counts for each step
+        self._step_order = []  # Track step order
+        self._step_containers = {}  # Track containers for each step
+        self._step_expanders = {}  # Track expanders for each step
         
-        self.min_score = 0.8  # Default min_score
-        self.theme = {
-            'background': '#1E1E1E',
-            'text': '#E0E0E0',
-            'accent1': '#00FF88',
-            'accent2': '#FF4081',
-            'accent3': '#7E57C2'
-        }
+        # Initialize main containers in specific order
+        self._main_container = st.container()
+        
+        # Progress section (always at top)
+        self._progress_section = self._main_container.container()
+        self._status_cols = self._progress_section.columns(3)
+        self._step_col = self._status_cols[0].empty()
+        self._count_col = self._status_cols[1].empty()
+        self._complete_col = self._status_cols[2].empty()
+        self._progress_bar = self._progress_section.empty()
+        self._progress_container = self._progress_section.empty()
+        self._progress_log = self._progress_section.empty()
+        
+        # Results section (below progress)
+        self._results_container = self._main_container.container()
+        self._log_container = self._main_container.container()
+        
+        # Add loading animations
+        self.add_loading_animations()
 
     def set_container(self, container):
         """Set the main Streamlit container."""
         self.container = container
 
-    def _format_message(self, message: str, container: Any = None):
-        """Format and display a message."""
-        logger.debug(f"Formatting message: {message[:100]}...")
-        if container:
-            logger.debug(f"Using provided container for message display")
-            container.markdown(message)
-        else:
-            logger.debug(f"Using default st.markdown for message display")
-            st.markdown(message)
+    def _format_message(self, message: str, container: Optional[st.container] = None) -> str:
+        """Format a message for display."""
+        if not message:
+            return ""
+            
+        # Add timestamp to message
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        message = f"[{timestamp}] {message}"
+        
+        # Only write to container if explicitly provided
+        if container is not None:
+            st.markdown(message, unsafe_allow_html=True)
+        return message  # Return the formatted message
 
-    def add_message(self, message: str, container: Any = None):
-        """Add a message to the progress log."""
-        logger.info(f"Adding message to progress log: {message[:100]}...")
-        formatted_message = self._format_message(message, container)
-        st.session_state.messages.append(formatted_message)
-        logger.debug("Message added to session state")
-        self._update_progress_log()
+    def add_message(self, message: str, step: str, container: Optional[st.container] = None):
+        """Add a message to the progress log for a specific step."""
+        # logger.info(f"Adding message to progress log for step {step}: {message[:100]}...")
+        formatted_message = self._format_message(message, container)  # Don't pass container here
+        if formatted_message:
+            if step not in st.session_state.messages:
+                st.session_state.messages[step] = []
+            st.session_state.messages[step].append(formatted_message)
+            # logger.debug(f"Message added to session state for step {step}")
+            
+            # Update the progress log in a non-blocking way
+            if hasattr(self, '_progress_log'):
+                try:
+                    with self._progress_log:
+                        self._update_progress_log()
+                except Exception as e:
+                    logger.error(f"Error updating progress log: {str(e)}")
 
     def _update_progress_log(self):
         """Update the progress log display with enhanced categorization and styling."""
-        logger.debug(f"Updating progress log with {len(st.session_state.messages)} messages")
-        if not st.session_state.messages:
-            logger.debug("No messages to display in progress log")
+        if not hasattr(self, '_progress_log'):
             return
             
-        # Create a formatted log with emojis and styling for different message types
-        log_entries = []
-        for msg in st.session_state.messages:
-            entry_class = "log-entry"
-            
-            # Categorize and style different types of log messages
-            if "📋 Research Plan:" in msg:
-                entry_class += " log-section plan-section"
-            elif "🔍 Analysis:" in msg:
-                entry_class += " log-section analysis-section"
-            elif "📊 Analysis Results:" in msg:
-                entry_class += " log-section analysis-results"
-            elif "🔄 Query Processing:" in msg:
-                entry_class += " log-section query-section"
-            elif "🚀 Starting Search:" in msg:
-                entry_class += " log-section search-section"
-            elif "⚡ Progress Update:" in msg:
-                entry_class += " progress-update"
-            elif "📈 Score:" in msg or "relevance score:" in msg.lower():
-                entry_class += " score-entry"
-            elif "⚠️" in msg:
-                entry_class += " warning-entry"
-            elif "✅" in msg:
-                entry_class += " success-entry"
-            elif "❌" in msg:
-                entry_class += " error-entry"
-            elif "🔍 Checking" in msg:
-                entry_class += " fact-check-entry"
-            
-            log_entries.append(f'<div class="{entry_class}">{msg}</div>')
-        
-        # Enhanced CSS styling for different log categories
         css = """
         <style>
-            .progress-log {
+            .log-container {
                 max-height: 400px;
                 overflow-y: auto;
                 padding: 10px;
-                background: rgba(0,0,0,0.05);
-                border-radius: 5px;
-            }
-            .log-entry {
-                margin: 5px 0;
-                padding: 5px;
-                border-radius: 3px;
+                background: #F8F9FA;
+                border-radius: 4px;
+                margin: 10px 0;
             }
             .log-section {
-                font-weight: bold;
-                padding: 8px;
                 margin: 10px 0;
-                border-left: 3px solid #7E57C2;
+                padding: 8px;
+                background: white;
+                border-radius: 4px;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.1);
             }
-            .analysis-section {
-                border-left-color: #00BFA5;
+            .log-section h4 {
+                margin: 0 0 8px 0;
+                color: #1565C0;
             }
-            .analysis-results {
-                border-left-color: #00B8D4;
-                background: rgba(0,184,212,0.1);
+            .log-message {
+                margin: 4px 0;
+                padding: 4px 0;
+                border-bottom: 1px solid #E9ECEF;
             }
-            .score-entry {
-                color: #00BFA5;
-            }
-            .warning-entry {
-                color: #FFA726;
-            }
-            .success-entry {
-                color: #66BB6A;
-            }
-            .error-entry {
-                color: #FF5252;
-            }
-            .fact-check-entry {
-                color: #7E57C2;
-                font-style: italic;
-            }
-            .progress-update {
-                font-style: italic;
-                color: #9E9E9E;
+            .log-message:last-child {
+                border-bottom: none;
             }
         </style>
         """
         
-        log_html = f"""
-        {css}
-        <div class="progress-log" id="progress-log">
-            {''.join(log_entries)}
-        </div>
-        <script>
-            window.setTimeout(function() {{
-                var log = document.getElementById('progress-log');
-                if (log) {{
-                    log.scrollTop = log.scrollHeight;
-                }}
-            }}, 100);
-        </script>
-        """
+        sections = []
+        if hasattr(st.session_state, 'messages'):
+            # Process messages in reverse order of steps
+            for step in reversed(list(st.session_state.messages.keys())):
+                messages = st.session_state.messages[step]
+                if messages:
+                    section = [
+                        f'<div class="log-section">',
+                        f'<h4>Step: {step}</h4>',
+                        '<div class="log-messages">',
+                    ]
+                    
+                    # Add messages in chronological order
+                    for msg in messages:
+                        section.append(f'<div class="log-message">{msg}</div>')
+                    
+                    section.extend(['</div>', '</div>'])
+                    sections.append('\n'.join(section))
         
-        self.progress_log.markdown(log_html, unsafe_allow_html=True)
+        # Join all sections with dividers
+        log_text = "\n".join(sections)
+        
+        # Update the progress log
+        try:
+            self._progress_log.markdown(f"{css}\n<div class='log-container'>{log_text}</div>", unsafe_allow_html=True)
+        except Exception as e:
+            logger.error(f"Error rendering progress log: {str(e)}")
 
     def _update_status(self, step: str = "", count: int = 0, complete: bool = False):
         """Update the status display."""
-        self.step_col.markdown(f"**Step:** {step}")
-        
-        # For validate_claim step, show Valid/Invalid counts alongside total results
-        if step == 'validate_claim':
-            # Only count definitively valid/invalid results
-            valid_count = len([r for r in self._results.values() 
-                             if r.get('validation', {}).get('is_valid', False)])
-            invalid_count = len([r for r in self._results.values() 
-                               if r.get('validation', {}).get('is_valid') is False])  # Explicitly False
-            
-            self.count_col.markdown(
-                f"**Results:** {count}\n"
-                f"**Valid:** {valid_count}\n"
-                f"**Invalid:** {invalid_count}"
-            )
-        else:
-            self.count_col.markdown(f"**Results:** {count}")
-            
+        if step:
+            self._step_col.markdown(f"**Step**: {step}")
+        if count > 0:
+            self._count_col.markdown(f"**Total Items**: {count}")
         if complete:
-            self.complete_col.markdown("✅ Search Complete!")
+            self._complete_col.markdown("✅ **Complete**")
         else:
-            self.complete_col.empty()
-            
-    def _update_progress(self, progress: float = 0):
-        """Update just the progress bar."""
+            self._complete_col.markdown("🔄 **Processing**")
+
+    def _update_progress(self, progress: float):
+        """Update the progress bar."""
         if progress is not None:
             self._progress = min(progress, 0.99)
-        self.progress_bar.progress(self._progress)
+        self._progress_bar.progress(self._progress)
+
+    def _display_progress(self, step: str, progress: float, message: str = None):
+        """Display progress with animation."""
+        progress_html = f"""
+        <div class="progress-wrapper" style="position: relative; z-index: 1000;">
+            <div class="progress-header">
+                <div class="spinner"></div>
+                <div class="progress-title">{step}</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: {progress * 100}%;"></div>
+            </div>
+            {f'<div class="progress-message loading">{message}</div>' if message else ''}
+        </div>
+        """
+        self._progress_container.markdown(progress_html, unsafe_allow_html=True)
+
+    async def cleanup(self):
+        """Clean up resources."""
+        # Clear containers
+        if hasattr(self, '_main_container'):
+            self._main_container.empty()
+        if hasattr(self, '_progress_container'):
+            self._progress_container.empty()
+        if hasattr(self, '_results_container'):
+            self._results_container.empty()
+        if hasattr(self, '_log_container'):
+            self._log_container.empty()
+        if hasattr(self, '_progress_bar'):
+            self._progress_bar.empty()
+        if hasattr(self, '_progress_log'):
+            self._progress_log.empty()
+        if hasattr(self, '_step_col'):
+            self._step_col.empty()
+        if hasattr(self, '_count_col'):
+            self._count_col.empty()
+        if hasattr(self, '_complete_col'):
+            self._complete_col.empty()
+        
+        # Reset state
+        self._progress = 0.0
+        self._results = {}
+        self._result_containers = {}
+        self._total_steps = 0
+        self._current_step = None
+        self._step_counts = {}
+        self._step_order = []
+        self._step_containers = {}
+        self._step_expanders = {}
+        self._expected_data_counts = {}
+        self._received_data_counts = {}
 
     async def stream_research_progress(self, pipeline_generator: AsyncGenerator[Dict[str, Any], None]):
         """
@@ -219,177 +230,165 @@ class StreamInterface:
             pipeline_generator: Async generator yielding pipeline updates
         """
         try:
+            # Initialize state for new search
             self._progress = 0.0
-            self._results = {}  # Track results by ID
-            self._result_containers = {}  # Track containers by ID
-            self._current_step_index = 0
-            self._current_step_progress = 0.0
-            self._step_progress = {}  # Track progress for each step
+            self._results = {}
+            self._result_containers = {}
+            self._total_steps = 0
+            self._current_step = None
+            self._step_counts = {}
+            self._step_order = []
+            self._step_containers = {}
+            self._step_expanders = {}
+            self._expected_data_counts = {}  # Track expected data counts per step
+            self._received_data_counts = {}  # Track received data counts per step
             
-            # Create results area
-            results_area = self.results_container.container()
-            results_area.markdown("### 📚 Search Results")
+            # Show initial processing state
+            self.show_processing_indicator()
             
             async for update in pipeline_generator:
-                update_type = update.get('type')
-                logger.debug(f"Received pipeline update type: {update_type} from step: {update.get('step', 'unknown')}, {update.get('data', 'unknown')}")
-                pipeline_data = update.get('data', {})
-                step = update.get('step')
-                if update_type == 'progress':
-                    step = update.get('step', '')
-                    total_steps = update.get('total_steps', 0)
-                    sub_step = update.get('sub_step', '')
-                    total = update.get('total', 0)
-                    processed = update.get('processed', 0)
-                    status = update.get('status', '')
+                # logger.debug(f"Received pipeline update: {update}")
+                
+                step = update.get('step', '')
+                progress = update.get('progress', 0)
+                message = update.get('message', '')
+                expected_count = update.get('total_items', 0)  # Get expected total items if provided
+                
+                # Update expected count if provided
+                if expected_count > 0:
+                    self._expected_data_counts[step] = expected_count
+                
+                # Initialize received count for new step
+                if step not in self._received_data_counts:
+                    self._received_data_counts[step] = 0
+                
+                # Display progress with animation
+                self._display_progress(step, progress, message)
+                
+                # Create or get step container
+                if step not in self._step_counts:
+                    self._step_counts[step] = 0
+                    self._total_steps += 1
+                    self._step_order.insert(0, step)  # Insert new steps at the beginning
                     
-                    if total_steps > 0:
-                        self._total_steps = total_steps
+                    # Clear results container
+                    self._results_container.empty()
+                    main_container = self._results_container.container()
                     
-                    if step:
-                        # Track progress for this step
-                        if step not in self._step_progress:
-                            self._step_progress[step] = {
-                                'processed': 0,
-                                'total': total if total > 0 else 1,
-                                'sub_step': sub_step
-                            }
-                        
-                        step_info = self._step_progress[step]
-                        if total > 0:
-                            step_info['total'] = total
-                        if processed >= 0:
-                            step_info['processed'] = processed
-                            
-                        # Calculate step progress
-                        self._current_step_progress = step_info['processed'] / step_info['total']
-                        
-                        # Calculate overall progress
-                        if self._total_steps > 0:
-                            total_progress = sum(
-                                info['processed'] / info['total'] 
-                                for info in self._step_progress.values()
-                            ) / self._total_steps
-                            
-                            self._update_progress(total_progress)
-                    
-                elif update_type == 'result':
-                    logger.debug(f"Processing result update - step: {step} - data: {pipeline_data}")
-                    
-                    # Handle validation updates
-                    if isinstance(pipeline_data, dict) and 'validation' in pipeline_data:
-                        validation = pipeline_data.get('validation')
-                        logger.debug(f"Found validation update: {validation} {update}")
-                        # Try to get result ID from the data
-                        metadata = update.get('metadata', {})
-                        result_id = (metadata.get('article_id') or 
-                                    pipeline_data.get('url') or 
-                                    pipeline_data.get('title') or 
-                                    pipeline_data.get('id'))
-                        
-                        logger.debug(f"Found result ID for validation: {result_id}")
-                        
-                        if result_id and result_id in self._results:
-                            logger.debug(f"Processing validation update for {result_id}: {validation}")
-                            
-                            # Update validation status and result data
-                            self._results[result_id].update(pipeline_data)
-                            
-                            # Remove if explicitly invalid
-                            if validation.get('is_valid') is False:
-                                logger.debug(f"Removing invalid result {result_id}")
-                                if result_id in self._result_containers:
-                                    self._result_containers[result_id].empty()
-                                    del self._result_containers[result_id]
-                                del self._results[result_id]
-                                logger.debug(f"Removed invalid result: {result_id}")
-                            else:
-                                # Update display for non-invalid results
-                                if result_id in self._result_containers:
-                                    self._display_result(
-                                        {'data': self._results[result_id]},
-                                        self._result_containers[result_id]
-                                    )
-                                    logger.debug(f"Updated display for result: {result_id}")
+                    # Recreate all step containers in current order
+                    for current_step in self._step_order:
+                        # Either create new expander or reuse existing one
+                        if current_step in self._step_expanders:
+                            self._step_expanders[current_step].label = f"Results ({len(update.get('data'))} items)"
+                            # Collapse previous steps, expand current step
+                            self._step_expanders[current_step].expanded = (current_step == step)
                         else:
-                            logger.debug(f"No matching result found for validation update: {result_id}")
+                            main_container.markdown(f"#### Step: {current_step}")
+                            # Only expand the current step
+                            self._step_expanders[current_step] = main_container.expander(
+                                f"Results ({len(update.get('data'))} items)", 
+                                expanded=(current_step == step)
+                            )
+
+                        if not current_step in self._step_containers:
+                            self._step_containers[current_step] = self._step_expanders[current_step].container()
+                
+                self._step_counts[step] += 1
+                
+                # Update current step and progress
+                if self._current_step != step:
+                    self._current_step = step
+                    logger.info(f"Starting step: {step}")
+                    self.add_message("▶️ *Starting processing...*", step)
                     
-                    # Handle non-validation updates
-                    if pipeline_data:
-                        # Process the pipeline data
-                        if isinstance(pipeline_data, dict):
-                            # Extract any results from pipeline data
-                            results = []
-                            if 'results' in pipeline_data:
-                                results = pipeline_data['results']
-                            elif 'original_data' in pipeline_data and isinstance(pipeline_data['original_data'], dict):
-                                results = pipeline_data['original_data'].get('results', [])
-                            elif pipeline_data.get('metadata') or pipeline_data.get('url') or pipeline_data.get('title'):
-                                # This looks like a record itself
-                                results = [pipeline_data]
-                            
-                            # Process each result that has an ID
-                            for result in results:
-                                if not isinstance(result, dict):
-                                    continue
-                                    
-                                # Get result ID
-                                metadata = result.get('metadata', {})
-                                result_id = metadata.get('article_id') or result.get('url') or result.get('title') or result.get('id')
-                                
-                                if not result_id:
-                                    continue
-                                
-                                # Create or update result
-                                if result_id not in self._results:
-                                    self._results[result_id] = result
-                                    with results_area:
-                                        self._result_containers[result_id] = st.empty()
-                                    logger.debug(f"Added new result: {result_id}")
-                                else:
-                                    # Don't update if already marked invalid
-                                    existing_validation = self._results[result_id].get('validation', {})
-                                    if existing_validation.get('is_valid') is False:
-                                        logger.debug(f"Skipping update for invalid result: {result_id}")
-                                        continue
-                                        
-                                    self._results[result_id].update(result)
-                                    logger.debug(f"Updated existing result: {result_id}")
-                                
-                                # Display the result
-                                if result_id in self._result_containers:
-                                    self._display_result(
-                                        {'data': self._results[result_id]},
-                                        self._result_containers[result_id]
-                                    )
-                            
-                            # Update progress and status
-                            self._progress = min(self._progress + 0.05, 0.95)
-                            self._update_progress(self._progress)
-                            
-                            # Only count results that aren't explicitly invalid
-                            valid_count = len([r for r in self._results.values() 
-                                             if r.get('validation', {}).get('is_valid') is not False])
-                            self._update_status(step=update.get('step', ''), count=valid_count)
+                    # Collapse previous steps when switching to a new one
+                    for prev_step, expander in self._step_expanders.items():
+                        if prev_step != step:
+                            expander.expanded = False
+                
+                # Calculate overall progress
+                step_index = len(self._step_order) - self._step_order.index(step) - 1
+                self._progress = (step_index / max(self._total_steps, 1)) + (1 / max(self._total_steps, 1) * 0.5)
+                self._update_progress(self._progress)
+                
+                # Handle the data which is now always a list
+                data_list = update.get('data', [])
+                if not isinstance(data_list, list):
+                    data_list = [data_list]
+                
+                # Update received count
+                self._received_data_counts[step] += len(data_list)
+                
+                # Update expander label with counts
+                if step in self._step_expanders:
+                    received = self._received_data_counts[step]
+                    expected = self._expected_data_counts.get(step, 0)
+                    count_display = f"{received}"
+                    if expected > 0:
+                        percentage = (received / expected) * 100
+                        count_display = f"{received}/{expected} ({percentage:.1f}%)"
+                    self._step_expanders[step].label = f"Results ({count_display} items)"
+                
+                # Create a fresh container for this batch of results
+                batch_container = self._step_containers[step]
+                
+                # Process items in reverse order so newest appears first
+                for item in data_list:
+                    if isinstance(item, dict) and item.get('article_id') or item.get('url') or item.get('title') or item.get('id'):
+                        # Get result ID from various possible sources
+                        result_id = (
+                            item.get('article_id') or 
+                            item.get('url') or 
+                            item.get('title') or 
+                            item.get('id')
+                        )
                         
-                elif update_type == 'error':
-                    error_msg = update.get('data', 'Unknown error')
-                    st.error(f"❌ Error: {error_msg}")
-                    logger.error(f"Pipeline error: {error_msg}")
+                        if result_id:
+                            self._results[result_id] = item
+                            self._result_containers[result_id] = batch_container
+                            self._display_result({'data': item}, batch_container)
+                            
+                            # Add result message to step log without container
+                            title = item.get('title', result_id)
+                            self.add_message(f"📄 **Processed**: {step} - {title}", step)
+                    elif isinstance(item, dict) and item.get('query') or item.get('content'):
+                        # Handle string/simple content
+                        content = item.get('query') or item.get('content')
+                        if content:
+                            self._results[content] = {'content': content}
+                            self._display_result({'data': {'content': content}}, batch_container)
+                    else:
+                        # Handle non-dict items (e.g. strings, numbers)
+                        result_id = str(item)
+                        if result_id:
+                            self._results[result_id] = {'content': item}
+                            self._display_result({'data': {'content': item}}, batch_container)
+                            self.add_message(f"🖋️ **Processed**: {step} - {result_id}", step)
                     
-            # Complete
-            valid_count = len([r for r in self._results.values() 
-                             if r.get('validation', {}).get('is_valid') is not False])
-            self._update_status(step="Complete", count=valid_count, complete=True)
-            self._update_progress(1.0)
+                # Update progress display
+                result_count = len(self._results)
+                self._update_status(
+                    step=f"{step} ({len(update.get('data'))} items)",
+                    count=result_count,
+                    complete=update.get('is_final', False)
+                )
+                
+                if update.get('is_final', False):
+                    logger.info(f"Step {step} completed")
+                    self.add_message(f"✅ **Step completed** with {self._step_counts[step]} items processed", step)
+                    # Collapse the expander when step is complete
+                    self._step_expanders[step].expanded = False
+                    if step == self._step_order[0]:  # Check first step since order is reversed
+                        self.add_message("✨ **All processing completed!**", step)
+                        self._update_progress(1.0)
                 
         except Exception as e:
-            logger.error(f"Error streaming results: {str(e)}", exc_info=True)
-            st.error(f"❌ Error: {str(e)}")
-            
+            logger.error(f"Error in pipeline processing: {str(e)}", exc_info=True)
+            if self._current_step:
+                self.add_message(f"❌ **Error**: {str(e)}", self._current_step)
+            raise
         finally:
-            # Clear progress
-            self.progress_bar.empty()
+            await self.cleanup()
 
     def clear_results(self):
         """Clear the current results."""
@@ -425,7 +424,7 @@ class StreamInterface:
         markdown = ["# Research Results\n"]
         
         for result in results:
-            title = result.get('title', 'Untitled')
+            title = result.get('title', '')
             content = result.get('content', '')
             url = result.get('url', '')
             score = float(result.get('score', 0))
@@ -445,12 +444,12 @@ class StreamInterface:
 
     def show_progress(self, progress_bar: Any, progress_log: Any):
         """Show the progress section."""
-        with self.progress_container:
+        with self._progress_container:
             st.markdown("### 🔄 Search Progress")
             # Create progress bar
-            self.progress_bar = progress_bar
+            self._progress_bar = progress_bar
             # Create log container
-            self.progress_log = progress_log
+            self._progress_log = progress_log
 
     def show_results_section(self, results_container: Any):
         """Show the results section."""
@@ -507,34 +506,236 @@ class StreamInterface:
         
         return fig
 
-    def _display_result(self, result: Dict[str, Any], container: Optional[st.container] = None) -> None:
-        """Display a single search result."""
+    def has_results(self) -> bool:
+        """Check if there are any results."""
+        return bool(st.session_state.results)
+
+    def _display_result(self, result: Dict[str, Any], container: st.container):
+        """Display a search result in the provided container."""
+        if not result or not isinstance(result, dict):
+            return
+
         data = result.get('data', {})
-        title = data.get('title', 'Untitled')
+        
+        # Handle string/simple content
+        if isinstance(data, str) or (isinstance(data, dict) and 'content' in data and isinstance(data['content'], str)):
+            content = data if isinstance(data, str) else data['content']
+            
+            # Detect if content looks like a search query
+            is_query = any(keyword in content.lower() for keyword in ['search', 'query', 'find', 'look for'])
+            icon = '🔍' if is_query else '📝'
+            
+            markdown = f"""
+<style>
+.simple-result {{
+    background: white;
+    border-radius: 12px;
+    margin: 16px 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+}}
+.simple-header {{
+    display: flex;
+    align-items: center;
+    background: #f3f6fc;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e8eaed;
+}}
+.simple-icon {{
+    font-size: 1.2em;
+    margin-right: 12px;
+}}
+.simple-type {{
+    color: #5f6368;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}}
+.simple-content {{
+    padding: 16px;
+    color: #202124;
+    line-height: 1.6;
+    font-size: 1.1em;
+}}
+.query-style {{
+    color: #1a73e8;
+    font-weight: 500;
+}}
+</style>
+
+<div class="simple-result">
+    <div class="simple-header">
+        <div class="simple-icon">{icon}</div>
+        <div class="simple-type">{is_query and "Search Query" or "Analysis"}</div>
+    </div>
+    <div class="simple-content{is_query and ' query-style' or ''}">
+        {content}
+    </div>
+</div>
+"""
+            container.markdown(markdown, unsafe_allow_html=True)
+            return
+            
+        # Handle complex dictionary data
+        title = data.get('title', '')
         url = data.get('url', '')
         score = data.get('score', 0)
-        metadata = data.get('metadata', {})
-        validation = data.get('validation', {})
+        document = data.get('document', '')
+        query = data.get('query', '')
+        claim = data.get('claim', '')
+        article_id = data.get('article_id', '')
         
-        # Create markdown for result
-        markdown = f"### [{title}]({url.replace(' ', '%20')})\n"
-        if metadata:
-            markdown += f"**ID:** {metadata.get('article_id', 'Unknown')}\n"
+        # Build the result box
+        parts = []
+        parts.append('<div class="result-box">')
+        
+        # Header section with relevance score
+        parts.append('<div class="result-header">')
+        if score:
+            score_color = '#4CAF50' if score > 0.8 else '#FFC107' if score > 0.6 else '#FF5722'
+            parts.append(f'<div class="relevance-score" style="background-color: {score_color}">')
+            parts.append(f'<div class="score-value">{score:.0%}</div>')
+            parts.append('<div class="score-label">relevant</div>')
+            parts.append('</div>')
+        
+        # Title and source
+        parts.append('<div class="header-content">')
+        if url:
+            parts.append(f'<h3 class="title"><a href="{url.replace(" ", "%20")}" target="_blank">{title or "Untitled"}</a></h3>')
+        elif title:
+            parts.append(f'<h3 class="title">{title}</h3>')
+        if article_id:
+            parts.append(f'<div class="source-id">Source ID: {article_id}</div>')
+        parts.append('</div>')  # Close header-content
+        parts.append('</div>')  # Close result-header
             
-        # Add validation status if available
-        if validation:
-            is_valid = validation.get('is_valid', False)
-            explanation = validation.get('explanation', '')
-            status = "✅ Valid" if is_valid else "❌ Invalid"
-            markdown += f"**Validation:** {status}\n"
-            if explanation:
-                markdown += f"**Explanation:** {explanation}\n"
+        # Query and Claim section
+        if query or claim:
+            parts.append('<div class="search-context">')
+            if query:
+                parts.append('<div class="query-box">')
+                parts.append('<div class="query-label">Search Query</div>')
+                parts.append(f'<div class="query-text">{query}</div>')
+                parts.append('</div>')
+            if claim:
+                parts.append('<div class="claim-box">')
+                parts.append('<div class="claim-label">Question/Claim</div>')
+                parts.append(f'<div class="claim-text">{claim}</div>')
+                parts.append('</div>')
+            parts.append('</div>')
+            
+        # Document content section
+        if document:
+            parts.append('<div class="document-section">')
+            parts.append('<div class="document-content">')
+            parts.append(document)
+            parts.append('</div>')
+            parts.append('</div>')
+            
+        parts.append('</div>')  # Close result-box
         
-        # Display the result
-        if container:
-            container.markdown(markdown)
-        else:
-            st.markdown(markdown)
+        # Add CSS
+        css = """
+        <style>
+        .result-box {
+            background: white;
+            border-radius: 12px;
+            padding: 0;
+            margin: 16px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .result-header {
+            display: flex;
+            align-items: stretch;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e8eaed;
+            padding: 16px;
+        }
+        .relevance-score {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-width: 60px;
+            height: 60px;
+            border-radius: 8px;
+            margin-right: 16px;
+            color: white;
+            padding: 8px;
+        }
+        .score-value {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+        .score-label {
+            font-size: 0.8em;
+            opacity: 0.9;
+        }
+        .header-content {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .title {
+            margin: 0 0 4px 0;
+            color: #1a73e8;
+            font-size: 1.2em;
+            line-height: 1.3;
+        }
+        .title a {
+            color: inherit;
+            text-decoration: none;
+        }
+        .title a:hover {
+            text-decoration: underline;
+        }
+        .source-id {
+            color: #5f6368;
+            font-size: 0.9em;
+        }
+        .search-context {
+            padding: 16px;
+            background: #f3f6fc;
+            border-bottom: 1px solid #e8eaed;
+        }
+        .query-box, .claim-box {
+            margin-bottom: 8px;
+        }
+        .query-box:last-child, .claim-box:last-child {
+            margin-bottom: 0;
+        }
+        .query-label, .claim-label {
+            font-size: 0.85em;
+            text-transform: uppercase;
+            color: #5f6368;
+            margin-bottom: 4px;
+            letter-spacing: 0.5px;
+        }
+        .query-text {
+            color: #3c4043;
+            font-size: 1em;
+        }
+        .claim-text {
+            color: #1a73e8;
+            font-size: 1.1em;
+            font-weight: 500;
+        }
+        .document-section {
+            padding: 16px;
+        }
+        .document-content {
+            color: #202124;
+            line-height: 1.6;
+            font-size: 1em;
+        }
+        </style>
+        """
+        
+        # Combine CSS and content
+        markdown = f"{css}\n{''.join(parts)}"
+        container.markdown(markdown, unsafe_allow_html=True)
 
     def show_export_button(self):
         """Show the export button."""
@@ -566,6 +767,111 @@ class StreamInterface:
         href = f'<a href="data:text/markdown;base64,{b64}" download="{filename}" class="export-link">📥 Export Results</a>'
         st.markdown(href, unsafe_allow_html=True)
 
-    def has_results(self) -> bool:
-        """Check if there are any results."""
-        return bool(st.session_state.results)
+    def add_loading_animations(self):
+        """Add loading animations and progress indicators."""
+        st.markdown("""
+        <style>
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .loading {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0,0,0,.1);
+            border-radius: 50%;
+            border-top-color: #1a73e8;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        .processing-indicator {
+            display: flex;
+            align-items: center;
+            padding: 8px 16px;
+            background: #f3f6fc;
+            border-radius: 8px;
+            color: #1a73e8;
+            font-weight: 500;
+            margin: 8px 0;
+        }
+        .processing-indicator .spinner {
+            margin-right: 12px;
+        }
+        .progress-wrapper {
+            background: #f3f6fc;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 16px 0;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }
+        .progress-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .progress-title {
+            font-weight: 500;
+            color: #1a73e8;
+            margin-left: 8px;
+        }
+        .progress-bar {
+            height: 6px;
+            background: #e8eaed;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #1a73e8;
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+        .progress-message {
+            margin-top: 8px;
+            color: #5f6368;
+        }
+        .stButton > button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+        .stButton > button[data-loading="true"] {
+            position: relative;
+            padding-right: 40px;
+        }
+        .stButton > button[data-loading="true"]::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            border: 2px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s linear infinite;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+    def show_processing_indicator(self):
+        """Show a processing indicator with spinner."""
+        st.markdown("""
+            <div class="processing-indicator">
+                <div class="spinner"></div>
+                <span>Processing your request...</span>
+            </div>
+        """, unsafe_allow_html=True)

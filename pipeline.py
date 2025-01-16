@@ -282,6 +282,15 @@ class Pipeline:
                 
                 if step.step_type == StepType.PIPELINE:
                     async for result in step.func(current_data, step.config):
+                        # Preserve child pipeline metadata and add parent context
+                        if isinstance(result, dict):
+                            result.update({
+                                'parent_step': step.name,
+                                'step': result.get('step', step.name),
+                                'is_final': result.get('is_final', False),
+                                'type': result.get('type', StepType.PIPELINE.value),
+                                'mode': result.get('mode', step.batch_config.execution_mode.value)
+                            })
                         yield result
                         logger.info(f"Got pipeline result: {result.get('type')} - {result.get('step')}")
                         if isinstance(result, dict) and 'data' in result:
@@ -289,15 +298,19 @@ class Pipeline:
                 else:
                     result = await step.func(current_data, step.config)
                     result = result if isinstance(result, list) else [result]
-                    
-                    result_chunks = chunk_results(result, step.batch_config.output_size)
+                    if step.batch_config.execution_mode == ExecutionMode.ALL or step.batch_config.execution_mode == ExecutionMode.IMMEDIATE:
+                        result_chunks = chunk_results(result, len(result))
+                    else:
+                        result_chunks = chunk_results(result, step.batch_config.output_size)
+                    total_items = len(result)  # Get total items for this step
                     for chunk in result_chunks:
                         yield {
                             'step': step.name,
                             'data': chunk,
-                            'type': step.step_type,
-                            'mode': step.execution_mode.value,
-                            'is_final': i == len(self.steps) - 1
+                            'type': step.step_type.value,
+                            'mode': step.batch_config.execution_mode.value,
+                            'is_final': i == len(self.steps) - 1,
+                            'total_items': total_items  # Include total items in update
                         }
                     current_data = result
 
@@ -320,14 +333,10 @@ class Pipeline:
             enabled: Whether this step is enabled by default
         """
         async def pipeline_wrapper(data: List[Any], config: Dict[str, Any] = None) -> AsyncGenerator[Any, None]:
-            buffer = []
+            """Wrapper function for nested pipeline execution."""
             async for result in pipeline.execute(data):
-                if isinstance(result, dict) and 'data' in result:
-                    buffer.extend(result['data'] if isinstance(result['data'], list) else [result['data']])
-                else:
-                    buffer.append(result)
-            for item in buffer:
-                yield item
+                # Pass through all results directly to preserve metadata
+                yield result
 
         self.steps.append(PipelineStep(
             name=name,

@@ -35,19 +35,10 @@ class FactChecker:
 Given the following research query, generate a single sentence claim or a Yes/No answerable question that can be fact-checked. The claim should conform the query into a Question or Claim. Do not modify or introduce any additional context to the nature of the query.
 Query: {query}
 
-Your response should be in the following format:
-<Examples>
-<Response Example 1>
-Claim: [A factual statement related to the query]
-<Response Example 2>
-Claim: [Another factual statement related to the query]
-<Response Example 3>
-Question: [A Yes/No question related to the query]
-<Response Example 4>
-Question: [Another Yes/No question related to the query]
-</Examples>
+Your response should be in ONE of the following formats:
 
-Your response should ONLY be ONE of the above formats. Only one claim or question should be generated.
+Claim: [A claim that can be fact-checked against a document]
+Question: [A Yes/No question that can be fact-checked against a document]
 """
             logger.debug(f"Using prompt for claim generation: {prompt}")
 
@@ -65,9 +56,11 @@ Your response should ONLY be ONE of the above formats. Only one claim or questio
                     "original_data": data
                 }
                 
-            # Add the generated claim to the data dictionary for the validate step
-            claim = response.strip()
-            # Update the pipeline data
+            # Extract the claim from the response
+            lines = response.strip().split('\n')
+            claim = next((line.split(':', 1)[1].strip() for line in lines if line.startswith(('Claim:', 'Question:'))), '')
+            
+            # Update the pipeline data with the generated claim
             data['claim'] = claim
                     
             logger.debug(f"Generated claim: {claim}")
@@ -135,35 +128,39 @@ Claim: {claim}
             logger.error(f"Validation failed: {str(e)}", exc_info=True)
             raise
 
-    async def validate_claims(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def validate_claims(self, items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
-        Validate claims against their documents.
-        Only returns items where the claim is validated as True.
+        Validate claims against source content.
         
         Args:
-            data_items: List of dictionaries, each containing a 'results' list to validate
-            config: Optional configuration parameters
+            items: List of items containing claims and source content
+            config: Optional configuration parameters including min_score
             
         Returns:
-            List of dictionaries that have valid claims
+            List of validated items
         """
-        logger.debug(f"Validating {len(data_items)} items")
+        config = config or {}
         
-        tasks = [self._validate_single_claim(item.get('claim', ''), item, config) for item in data_items]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        # Filter valid results while preserving data structure
-        valid_results = []
-        for i, (item, validation) in enumerate(zip(data_items, results)):
-            if isinstance(validation, Exception):
-                logger.error(f"Error in validation {i}: {str(validation)}")
+        logger.debug(f"Validating {len(items)} claims")
+        validated_items = []
+        for item in items:
+            logger.debug(f"Validating claim: {item.get('claim', 'No claim provided')} against item: {item}")
+            document = item.get('document', '')
+            claims_to_verify = item.get('analysis', {}).get('claims_to_verify', [])
+            if not claims_to_verify or not document:
+                logger.error("No claims or document provided for validation")
                 continue
-            claim = item.get('claim', '')
-            logger.debug(f"validate_claims Validation result for claim: {claim} - {validation}")
-                
-            if validation.get('is_valid', False):
-                logger.debug(f"Valid result for: {item} {claim}")
-                valid_results.append(item)
-            else:
-                logger.debug(f"Filtered out result for: {item} {claim}")
-                
-        return valid_results
+            
+            if claims_to_verify:
+                # If claims_to_verify is provided, validate each claim in the list
+                for claim_to_verify in claims_to_verify:
+                    logger.debug(f"Validating claim: {claim_to_verify} against document: {document}")
+                    prompt = await self._create_validation_prompt(claim_to_verify, document)
+                    validation = await self.llm_manager.get_string_response(prompt=prompt, model="bespoke-minicheck")
+                    logger.debug(f"Validation result for claim: {claim_to_verify} - {validation}")
+                    if validation == 'Yes':
+                        validated_items.append(item)
+                        break
+            # Return just the validation result
+        logger.debug(f"Validated {len(validated_items)} claims out of {len(items)} items")
+        return validated_items
