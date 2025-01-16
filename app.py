@@ -80,13 +80,14 @@ def create_pipeline(llm_manager: LLMManager, config: Dict[str, Any] = None) -> P
     pipeline = Pipeline(config=config or {})
 
     # Add steps with array-based methods
-    pipeline.add_map("analyze", query_processor.analyze_queries)
-    pipeline.add_map("decompose", query_processor.decompose_queries)
+    pipeline.add_map("analyze", query_processor.analyze_queries, execution_mode=ExecutionMode.IMMEDIATE)
+    pipeline.add_map("decompose", query_processor.decompose_queries, execution_mode=ExecutionMode.IMMEDIATE)
+    pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.IMMEDIATE)
+
     # pipeline.add_map("enrich", query_processor.enrich_queries)
     
-    pipeline.add_map("search", data_sources.stream_search_wikipedia, execution_mode=ExecutionMode.ALL)
-    # pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.ALL)
-    pipeline.add_filter("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.ALL)
+    pipeline.add_map("search", data_sources.stream_search_wikipedia, execution_mode=ExecutionMode.IMMEDIATE)
+    pipeline.add_map("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.IMMEDIATE)
     
     return pipeline
 
@@ -132,6 +133,7 @@ class SearchRequestProcessor:
             self.pipeline.append(query)
             
             async for processed_result in self.pipeline.process_queue():
+                logger.info(f"Processed result: {processed_result} - {processed_result.get('step')}")
                 yield processed_result
                 
         except Exception as e:

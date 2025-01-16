@@ -292,27 +292,47 @@ class Pipeline:
                                 'mode': result.get('mode', step.batch_config.execution_mode.value)
                             })
                         yield result
-                        logger.info(f"Got pipeline result: {result.get('type')} - {result.get('step')}")
                         if isinstance(result, dict) and 'data' in result:
                             current_data = result['data'] if isinstance(result['data'], list) else [result['data']]
                 else:
-                    result = await step.func(current_data, step.config)
-                    result = result if isinstance(result, list) else [result]
-                    if step.batch_config.execution_mode == ExecutionMode.ALL or step.batch_config.execution_mode == ExecutionMode.IMMEDIATE:
-                        result_chunks = chunk_results(result, len(result))
-                    else:
-                        result_chunks = chunk_results(result, step.batch_config.output_size)
-                    total_items = len(result)  # Get total items for this step
-                    for chunk in result_chunks:
+                    all_results = []
+                    async for result in step.func(current_data, step.config):
+                        if result:  # Skip empty results
+                            result = result if isinstance(result, list) else [result]
+                            all_results.extend(result)
+                            
+                            # For immediate mode, yield each result as it comes
+                            if step.batch_config.execution_mode == ExecutionMode.IMMEDIATE:
+                                yield {
+                                    'step': step.name,
+                                    'data': result,
+                                    'type': step.step_type.value,
+                                    'mode': step.batch_config.execution_mode.value,
+                                    'is_final': i == len(self.steps) - 1,
+                                    'total_items': len(current_data)
+                                }
+                    
+                    # For ALL mode, yield all results at once
+                    if step.batch_config.execution_mode == ExecutionMode.ALL:
                         yield {
                             'step': step.name,
-                            'data': chunk,
+                            'data': all_results,
                             'type': step.step_type.value,
                             'mode': step.batch_config.execution_mode.value,
                             'is_final': i == len(self.steps) - 1,
-                            'total_items': total_items  # Include total items in update
+                            'progress': 1.0,
+                            'total_items': len(current_data)
                         }
-                    current_data = result
+                    yield {
+                        'step': step.name,
+                        'type': step.step_type.value,
+                        'mode': step.batch_config.execution_mode.value,
+                        'is_final': i == len(self.steps) - 1,
+                        'progress': 1.0,
+                        'total_items': len(current_data)
+                    }
+                    # Update current_data for next step
+                    current_data = all_results if all_results else current_data
 
             except Exception as e:
                 logger.error(f"Error in pipeline step {step.name}: {str(e)}", exc_info=True)
@@ -322,7 +342,7 @@ class Pipeline:
                     'data': current_data,
                     'type': step.step_type.value,
                     'mode': step.batch_config.execution_mode.value
-                }  
+                }
     def add_pipeline(self, name: str, pipeline: 'Pipeline', enabled: bool = True) -> None:
         """
         Add another pipeline as a step.

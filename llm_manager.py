@@ -28,12 +28,12 @@ class LLMManager:
         except Exception as e:
             self.logger.error(f"Error closing LLM manager session: {str(e)}", exc_info=True)
 
-    async def get_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.9, stream: bool = False) -> str:
+    async def get_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.9, stream: bool = False, system_prompt: str = None) -> str:
         """Get response from LLM."""
         try:
             if not self.session:
                 raise RuntimeError("LLMManager must be used as an async context manager")
-            return await fetch_gpt_response(self.session, prompt, max_tokens, model, temperature, stream)
+            return await fetch_gpt_response(self.session, prompt, max_tokens, model, temperature, stream, system_prompt)
         except Exception as e:
             self.logger.error(f"Error getting LLM response: {str(e)}")
             return None
@@ -80,7 +80,7 @@ class LLMManager:
             self.logger.error(f"Error getting JSON response: {str(e)}")
             return {}
 
-    async def get_string_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.3, stream: bool = False) -> str:
+    async def get_string_response(self, prompt: str, max_tokens: int = None, model: str = "phi4", temperature: float = 0.3, stream: bool = False, system_prompt: str = None) -> str:
         """
         Get string response from LLM.
         
@@ -90,12 +90,13 @@ class LLMManager:
             model: The model to use (default: phi4)
             temperature: Temperature parameter for generation (default: 0.9)
             stream: Whether to stream the response (default: False)
-            
+            system_prompt: Optional system prompt to set context/behavior (default: None)
+        
         Returns:
             String response from the LLM
         """
         try:
-            return await self.get_response(prompt, max_tokens, model=model, temperature=temperature, stream=stream)
+            return await self.get_response(prompt, max_tokens, model=model, temperature=temperature, stream=stream, system_prompt=system_prompt)
         except Exception as e:
             self.logger.error(f"Error getting string response: {str(e)}")
             return ""

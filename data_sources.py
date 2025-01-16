@@ -5,6 +5,8 @@ import json
 import string
 import aiohttp
 import asyncio
+import re
+import html
 from typing import Dict, List, Any, Optional, Union
 from txtai.embeddings import Embeddings
 import logging
@@ -150,6 +152,150 @@ class DataSources:
             logger.error(f"Error fetching Wikipedia page: {str(e)}", exc_info=True)
             return {}
             
+    async def get_full_wikipedia_page(self, page_identifier: Union[str, int]) -> Dict[str, Any]:
+        """
+        Get the full content of a Wikipedia page by title or ID.
+        
+        Args:
+            page_identifier: Either the title of the page or its page ID
+            
+        Returns:
+            Dictionary containing:
+                - title: Page title
+                - pageid: Wikipedia page ID
+                - url: URL to the page
+                - content: Raw MediaWiki content
+                - categories: List of categories
+                - timestamp: Last modification time
+                - sections: List of sections, each containing:
+                    - level: Heading level (1-6)
+                    - title: Section title
+                    - content: Section content
+            
+        Raises:
+            ValueError: If the page identifier is empty or invalid, or if the page is not found
+        """
+        if not page_identifier and not isinstance(page_identifier, int):
+            raise ValueError("Page identifier cannot be empty")
+            
+        base_url = "https://en.wikipedia.org/w/api.php"
+        
+        # Build the query parameters
+        params = {
+            "action": "query",
+            "format": "json",
+            "prop": "revisions|categories|info",
+            "rvprop": "content|timestamp",
+            "rvslots": "main",
+            "inprop": "url|displaytitle",
+            "formatversion": "2",
+            "redirects": "1"
+        }
+        
+        # Add either titles or pageids parameter
+        if isinstance(page_identifier, int):
+            params["pageids"] = str(page_identifier)
+        else:
+            params["titles"] = page_identifier
+            
+        async with self.session.get(base_url, params=params) as response:
+            data = await response.json()
+            
+            if "error" in data:
+                raise ValueError(f"API Error: {data['error']['info']}")
+                
+            if "query" not in data or "pages" not in data["query"]:
+                raise ValueError("Invalid API response")
+                
+            # Get the page data
+            pages = data["query"]["pages"]
+            if not pages:
+                raise ValueError(f"Page '{page_identifier}' not found")
+                
+            page = pages[0]  # formatversion=2 returns an array
+            
+            if "missing" in page:
+                raise ValueError(f"Page '{page_identifier}' not found")
+                
+            # Extract the content from revisions
+            if "revisions" not in page or not page["revisions"]:
+                raise ValueError("No content found")
+                
+            content = page["revisions"][0]["slots"]["main"]["content"]
+            
+            # Parse sections from the content
+            sections = []
+            current_section = {"level": 0, "title": "Introduction", "content": []}
+            current_content = []
+            
+            for line in content.split('\n'):
+                # Check for section headers (== Title ==)
+                if line.strip().startswith('=='):
+                    # Count the number of = signs to determine level
+                    left = len(line.strip()) - len(line.strip().lstrip('='))
+                    right = len(line.strip()) - len(line.strip().rstrip('='))
+                    if left == right:  # Balanced = signs
+                        # This is a section header
+                        if current_content:
+                            current_section["content"] = '\n'.join(current_content).strip()
+                            sections.append(current_section)
+                            current_content = []
+                        
+                        level = left//2
+                        title = line.strip('= \t\n\r')
+                        current_section = {"level": level, "title": title, "content": []}
+                        continue
+                
+                current_content.append(line)
+            
+            # Add the last section
+            if current_content:
+                current_section["content"] = '\n'.join(current_content).strip()
+                sections.append(current_section)
+            
+            # Extract templates (like infoboxes) from the first section
+            if sections:
+                intro = sections[0]["content"]
+                templates = []
+                template_start = -1
+                brace_count = 0
+                
+                for i, char in enumerate(intro):
+                    if char == '{' and i+1 < len(intro) and intro[i+1] == '{':
+                        if brace_count == 0:
+                            template_start = i
+                        brace_count += 1
+                    elif char == '}' and i+1 < len(intro) and intro[i+1] == '}':
+                        brace_count -= 1
+                        if brace_count == 0 and template_start != -1:
+                            template = intro[template_start:i+2]
+                            templates.append(template)
+                
+                # Add templates to result
+                result = {
+                    "title": page.get("title", ""),
+                    "pageid": page.get("pageid"),
+                    "url": page.get("fullurl", ""),
+                    "content": content,
+                    "categories": [cat.get("title", "") for cat in page.get("categories", [])],
+                    "timestamp": page["revisions"][0].get("timestamp"),
+                    "sections": sections,
+                    "templates": templates
+                }
+            else:
+                result = {
+                    "title": page.get("title", ""),
+                    "pageid": page.get("pageid"),
+                    "url": page.get("fullurl", ""),
+                    "content": content,
+                    "categories": [cat.get("title", "") for cat in page.get("categories", [])],
+                    "timestamp": page["revisions"][0].get("timestamp"),
+                    "sections": sections
+                }
+            
+            logging.info(f"Successfully fetched full Wikipedia page: {result['title']}")
+            return result
+
     async def search_wikidata(self, query: str, limit: int = 5):
         # Implement Wikidata search using their SPARQL endpoint or API
         # Placeholder for actual implementation
@@ -246,20 +392,19 @@ class DataSources:
             logger.error(f"Error fetching article {article_id}: {str(e)}")
             return None
             
-    async def stream_search_wikipedia(self, queries: List[str], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def stream_search_wikipedia(self, queries: List[Dict[str, Any]], config: Dict[str, Any] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Search Wikipedia for relevant articles based on queries.
         
         Args:
-            queries: List of search queries
+            queries: List of query items
             config: Optional configuration parameters including min_score
             
-        Returns:
-            List of search results with metadata
+        Yields:
+            Search results with metadata
         """
         config = config or {}
         min_score = config.get('min_score', 0.7)
-        results = []
         seen_articles = set()
         
         try:
@@ -272,32 +417,34 @@ class DataSources:
                 if not query:
                     logger.error("No query provided")
                     continue
+                    
                 search_config = config or {}
                 min_percentile = search_config.get('min_percentile', 0.0)
                 limit = search_config.get('limit', 100)
                 
+                # Initialize embeddings if needed
                 if self.embeddings is None:
                     self.initialize()
-                    
+                
                 if not self.embeddings:
                     logger.error("Failed to initialize embeddings")
-                    return results
-                    
-                logger.info(f"Searching Wikipedia for query: {query}")
+                    return
+                
+                # Search using embeddings
                 raw_results = self.embeddings.search(query, limit=limit)
                 
+                # Process each article
                 for result in raw_results:
                     score = float(result.get('score', 0.0))
                     if score < min_score:
                         continue
                         
                     article_id = result.get('id', '')
-                    
-                    # Skip if we've seen this article before
                     if article_id in seen_articles:
                         continue
+                    seen_articles.add(article_id)
                     
-                    # Check cache first
+                    # Get article data from cache or fetch
                     article_data = self._get_cached_article(article_id)
                     if not article_data:
                         article_data = await self._fetch_wikipedia_article(article_id)
@@ -307,21 +454,16 @@ class DataSources:
                     if not article_data:
                         continue
                         
-                    search_result = {
+                    yield {
                         **query_item,
                         'article_id': article_id,
                         'title': article_data.get('title', ''),
                         'url': f"https://en.wikipedia.org/wiki/{article_id}",
-                        'document': article_data.get('text', ''),
                         'score': score,
-                        'query': query
+                        'document': article_data.get('text', ''),
+                        'summary': article_data.get('summary', '')
                     }
                     
-                    seen_articles.add(article_id)
-                    results.append(search_result)
-
         except Exception as e:
             logger.error(f"Error in stream_search_wikipedia: {str(e)}", exc_info=True)
             raise
-
-        return results

@@ -99,7 +99,7 @@ OPENAI_SEMAPHORE = asyncio.Semaphore(5)  # Limit concurrent API calls
 
 @log_function_call
 @retry_on_error
-async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperature=0.9, stream=False):
+async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperature=0.9, stream=False, system_prompt=None):
     """
     Fetch response from GPT API.
     
@@ -110,6 +110,7 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
         temperature: Temperature parameter
         max_tokens: Maximum tokens to generate
         stream: Whether to stream the response
+        system_prompt: Optional system prompt to set context/behavior
         
     Returns:
         str: Generated response
@@ -119,9 +120,14 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "temperature": temperature,
     }
     if max_tokens is not None:

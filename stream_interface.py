@@ -243,9 +243,6 @@ class StreamInterface:
             self._expected_data_counts = {}  # Track expected data counts per step
             self._received_data_counts = {}  # Track received data counts per step
             
-            # Show initial processing state
-            self.show_processing_indicator()
-            
             async for update in pipeline_generator:
                 # logger.debug(f"Received pipeline update: {update}")
                 
@@ -279,14 +276,14 @@ class StreamInterface:
                     for current_step in self._step_order:
                         # Either create new expander or reuse existing one
                         if current_step in self._step_expanders:
-                            self._step_expanders[current_step].label = f"Results ({len(update.get('data'))} items)"
+                            self._step_expanders[current_step].label = f"Results ({len(update.get('data', []))} items)"
                             # Collapse previous steps, expand current step
                             self._step_expanders[current_step].expanded = (current_step == step)
                         else:
                             main_container.markdown(f"#### Step: {current_step}")
                             # Only expand the current step
                             self._step_expanders[current_step] = main_container.expander(
-                                f"Results ({len(update.get('data'))} items)", 
+                                f"Results ({len(update.get('data', []))} items)", 
                                 expanded=(current_step == step)
                             )
 
@@ -368,7 +365,7 @@ class StreamInterface:
                 # Update progress display
                 result_count = len(self._results)
                 self._update_status(
-                    step=f"{step} ({len(update.get('data'))} items)",
+                    step=f"{step} ({len(update.get('data', []))} items)",
                     count=result_count,
                     complete=update.get('is_final', False)
                 )
@@ -584,6 +581,7 @@ class StreamInterface:
         query = data.get('query', '')
         claim = data.get('claim', '')
         article_id = data.get('article_id', '')
+        validation_rate = data.get('validation_rate')
         
         # Build the result box
         parts = []
@@ -610,7 +608,7 @@ class StreamInterface:
         parts.append('</div>')  # Close result-header
             
         # Query and Claim section
-        if query or claim:
+        if query or claim or validation_rate is not None:
             parts.append('<div class="search-context">')
             if query:
                 parts.append('<div class="query-box">')
@@ -621,6 +619,11 @@ class StreamInterface:
                 parts.append('<div class="claim-box">')
                 parts.append('<div class="claim-label">Question/Claim</div>')
                 parts.append(f'<div class="claim-text">{claim}</div>')
+                if validation_rate is not None:
+                    validation_color = '#4CAF50' if validation_rate >= 80 else '#FFC107' if validation_rate >= 50 else '#FF5722'
+                    parts.append(f'<div class="validation-rate" style="color: {validation_color}">')
+                    parts.append(f'Validation Rate: {validation_rate:.0f}%')
+                    parts.append('</div>')
                 parts.append('</div>')
             parts.append('</div>')
             
@@ -721,6 +724,12 @@ class StreamInterface:
             color: #1a73e8;
             font-size: 1.1em;
             font-weight: 500;
+            margin-bottom: 4px;
+        }
+        .validation-rate {
+            font-size: 0.9em;
+            font-weight: 500;
+            margin-top: 4px;
         }
         .document-section {
             padding: 16px;

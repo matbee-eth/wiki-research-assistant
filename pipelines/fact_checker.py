@@ -31,19 +31,21 @@ class FactChecker:
             query = data.get('query', '')
             logger.debug(f"Generating claim for query: {query} {data}")
             
-            prompt = f"""
-Given the following research query, generate a single sentence claim or a Yes/No answerable question that can be fact-checked. The claim should conform the query into a Question or Claim. Do not modify or introduce any additional context to the nature of the query.
-Query: {query}
+            system_prompt = """You are a fact-checking assistant that converts research queries into clear, verifiable claims or Yes/No questions.
+Your task is to generate a single sentence claim or a Yes/No answerable question that can be fact-checked.
+You must conform the query into a Question or Claim without modifying or introducing any additional context.
+Any Geographic or Temporal constraints must be included in the claim or question.
+You must strictly adhere to the provided query, topic, geographic and timeline constraints.
 
-Your response should be in ONE of the following formats:
+Your response must be in ONE of these formats:
+Claim: [A non-vague, directed, claim that can be fact-checked against a document]
+Question: [A non-vague, directed, Yes/No question that can be fact-checked against a document]"""
 
-Claim: [A claim that can be fact-checked against a document]
-Question: [A Yes/No question that can be fact-checked against a document]
-"""
-            logger.debug(f"Using prompt for claim generation: {prompt}")
+            logger.debug(f"Using system prompt for claim generation")
 
             response = await self.llm_manager.get_string_response(
-                prompt=prompt,
+                prompt=query,
+                system_prompt=system_prompt,
                 model='phi4'
             )
             logger.debug(f"Received response from phi4 model: {response}")
@@ -64,34 +66,31 @@ Question: [A Yes/No question that can be fact-checked against a document]
             data['claim'] = claim
                     
             logger.debug(f"Generated claim: {claim}")
-            # logger.debug(f"Returning claim generation result: {result}")
             return data
             
         except Exception as e:
             logger.error(f"Claim generation failed: {str(e)}", exc_info=True)
             raise
 
-    async def generate_claims(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def generate_claims(self, items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Generate claims for multiple queries in parallel.
+        Generate claims from items.
         
         Args:
-            data_items: List of dictionaries containing queries to generate claims from
+            items: List of items to generate claims for
             config: Optional configuration parameters
             
-        Returns:
-            List of dictionaries containing generated claims and metadata
+        Yields:
+            Items with generated claims
         """
-        logger.debug(f"Generating claims for {len(data_items)} items")
-        tasks = [self._generate_single_claim(item, config) for item in data_items]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        
-        # Handle any exceptions
-        processed_results = []
-        for i, result in enumerate(results):
-            processed_results.append(result)
-        logger.debug(f"Generated {len(processed_results)} claims for {len(data_items)} items")
-        return processed_results
+        for item in items:
+            try:
+                claim = await self._generate_single_claim(item, config)
+                if claim:
+                    item['claim'] = claim
+                    yield item
+            except Exception as e:
+                logger.error(f"Error generating claim: {str(e)}", exc_info=True)
 
     async def _create_validation_prompt(self, claim: str, document: str) -> str:
         """Create the prompt for claim validation."""
@@ -128,7 +127,7 @@ Claim: {claim}
             logger.error(f"Validation failed: {str(e)}", exc_info=True)
             raise
 
-    async def validate_claims(self, items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    async def validate_claims(self, items: List[Dict[str, Any]], config: Dict[str, Any] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Validate claims against source content.
         
@@ -136,31 +135,60 @@ Claim: {claim}
             items: List of items containing claims and source content
             config: Optional configuration parameters including min_score
             
-        Returns:
-            List of validated items
+        Yields:
+            Validated items
         """
         config = config or {}
         
         logger.debug(f"Validating {len(items)} claims")
-        validated_items = []
         for item in items:
-            logger.debug(f"Validating claim: {item.get('claim', 'No claim provided')} against item: {item}")
             document = item.get('document', '')
-            claims_to_verify = item.get('analysis', {}).get('claims_to_verify', [])
-            if not claims_to_verify or not document:
-                logger.error("No claims or document provided for validation")
+            if not document:
+                logger.error("No document provided for validation")
+                continue
+                
+            # Get claims to verify from analysis or use the document content
+            claims_to_verify = []
+            if 'analysis' in item and isinstance(item['analysis'], dict):
+                claims_to_verify = item['analysis'].get('claims_to_verify', [])
+            
+            # If no claims in analysis, generate a claim from the document
+            if not claims_to_verify:
+                try:
+                    claim = await self._generate_single_claim(item, config)
+                    if claim:
+                        claims_to_verify = [claim]
+                except Exception as e:
+                    logger.error(f"Error generating claim: {str(e)}")
+                    continue
+            
+            if not claims_to_verify:
+                logger.error("No claims available for validation")
                 continue
             
-            if claims_to_verify:
-                # If claims_to_verify is provided, validate each claim in the list
-                for claim_to_verify in claims_to_verify:
-                    logger.debug(f"Validating claim: {claim_to_verify} against document: {document}")
+            # Validate all claims
+            validations = []
+            valid_count = 0
+            for claim_to_verify in claims_to_verify:
+                try:
+                    logger.debug(f"Validating claim: {claim_to_verify}")
                     prompt = await self._create_validation_prompt(claim_to_verify, document)
                     validation = await self.llm_manager.get_string_response(prompt=prompt, model="bespoke-minicheck")
                     logger.debug(f"Validation result for claim: {claim_to_verify} - {validation}")
+                    
                     if validation == 'Yes':
-                        validated_items.append(item)
-                        break
-            # Return just the validation result
-        logger.debug(f"Validated {len(validated_items)} claims out of {len(items)} items")
-        return validated_items
+                        if valid_count == 0:
+                            validations.append((claim_to_verify, validation))
+                        valid_count += 1
+                except Exception as e:
+                    logger.error(f"Error validating claim: {str(e)}")
+                    validations.append((claim_to_verify, "Error"))
+
+            # Calculate validation rate
+            validation_rate = (valid_count / len(claims_to_verify)) * 100 if claims_to_verify else 0
+
+            # Yield results if at least one validation passes
+            if valid_count > 0:
+                for claim, validation in validations:
+                    validated_item = {**item, 'claim': claim, 'validation': validation, 'validation_rate': validation_rate}
+                    yield validated_item

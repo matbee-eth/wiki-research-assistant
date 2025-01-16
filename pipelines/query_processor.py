@@ -1,5 +1,5 @@
 import string
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, AsyncGenerator
 import logging
 import json
 import asyncio
@@ -16,19 +16,21 @@ class QueryProcessor:
 
     async def _decompose_single_query(self, item: Dict[str, Any], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Decompose a single query into multiple sub-queries."""
-        # logger.info(f"Decomposing query: {item.get('query', '')}")
         
-        prompt = """Break down this research query into focused semantic search queries.
-        Return a JSON array of strings, where each string is a focused sub-query that explores a specific aspect.
-        Adhere to the analysis provided, such as topic, time period, geographic scope, and evidence types.
-        Consider variations of the original query that might yield more relevant results.
+        system_prompt = """You are a query decomposition expert.
+Your task is to break down research queries into focused semantic search queries.
+You must return ONLY a JSON array of strings, where each string is a focused sub-query that explores a specific aspect.
+Adhere to the provided analysis information regarding topic, time period, geographic scope, and evidence types.
+Consider variations of the original query that might yield more relevant results."""
 
-Analysis of query: "{}"
-Original query: "{}"
+        # Combine analysis and query into a single prompt
+        prompt = f"""Analysis: {item.get('analysis', '')}
+Query: {item.get('query', '')}"""
 
-Respond with only a JSON array of strings.""".format(item.get('analysis', ''), item.get('query', ''))
-        
-        response = await self.llm_manager.get_string_response(prompt=prompt)
+        response = await self.llm_manager.get_string_response(
+            prompt=prompt,
+            system_prompt=system_prompt
+        )
         sub_queries = await self._parse_json_response(response)
         # Map each sub-query to the same data in 'item' but update the 'query' field
         decomposed_items = [
@@ -37,89 +39,71 @@ Respond with only a JSON array of strings.""".format(item.get('analysis', ''), i
         ]
         return decomposed_items
 
-    async def decompose_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> List[Dict[str, Any]]:
+    async def decompose_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> AsyncGenerator[Dict[str, Any], None]:
         """Map each query to multiple sub-queries."""
-        tasks = [self._decompose_single_query(item, config) for item in data_items]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        
-        # Create new list with all results
-        processed_results = []
-        processed_results.extend(data_items)  # Keep original items
-        for result in results:
-            processed_results.extend(result)  # Add sub-queries
-                
-        return processed_results
+        for item in data_items:
+            decomposed = await self._decompose_single_query(item, config)
+            for result in decomposed:
+                yield result
 
     async def _enrich_single_query(self, item: Dict[str, Any], config: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Enrich a single query into multiple variations."""
-        # logger.info(f"Enriching query: {item.get('query', '')}")
         
-        prompt = """As an expert in semantic search and knowledge graphs, analyze this query and generate variations of it to explore different aspects.
-        Consider historical, cultural, and domain-specific relationships.
-        Return a JSON array of strings, where each string is a variation that might yield relevant results.
+        system_prompt = """You are an expert in semantic search and knowledge graphs.
+Your task is to analyze queries and generate variations to explore different aspects.
+Consider historical, cultural, and domain-specific relationships.
+You must return ONLY a JSON array of strings, where each string is a variation that might yield relevant results."""
 
-Original query: "{}"
-
-Respond with only a JSON array of strings.""".format(item.get('query', ''))
-        
-        response = await self.llm_manager.get_string_response(prompt=prompt)
+        response = await self.llm_manager.get_string_response(
+            prompt=item.get('query', ''),
+            system_prompt=system_prompt
+        )
         enriched_queries = await self._parse_json_response(response)
             
         return enriched_queries
 
-    async def enrich_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> List[Dict[str, Any]]:
+    async def enrich_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> AsyncGenerator[Dict[str, Any], None]:
         """Map each query to multiple enriched variations."""
-        tasks = [self._enrich_single_query(item, config) for item in data_items]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        
-        # Flatten results
-        processed_results = []
-        for result in results:
-            processed_results.extend(result)  # Add all variations
-                
-        return processed_results
+        for item in data_items:
+            enriched = await self._enrich_single_query(item, config)
+            for result in enriched:
+                yield result
 
     async def _analyze_single_query(self, query: Dict[str, Any], config: Dict[str, Any] = None):
         """
         Analyze a single query to identify key components.
         Internal helper method for analyze_queries.
         """
-        prompt = f"""
-        Step 1. 
-        Complete a step-by-step analysis of this query. Analyze this research query and identify its key components.
-            Consider:
-            - Topic or subject
-            - Time period or temporal constraints
-            - Geographic scope
-            - Required evidence types
-            - Specific claims to verify
+        system_prompt = """You are a query analysis expert.
+Your task is to analyze research queries and identify their key components in a structured format.
+You must follow these steps:
 
-        Query: "{query}"
+1. Analyze the query considering:
+   - Topic or subject
+   - Time period or temporal constraints
+   - Geographic scope
+   - Required evidence types
+   - Specific, non-vague, and direct claims to verify against any possibly relevant documents. Used for semantic filtering.
 
-        Step 2.
-            Return a JSON object with the following structure:
-            <nitpick>
-            "claims_to_verify" field entries should not use words like "it", "this", "that", "they", "them" to refer to the query or topic, specify the topic in place of these vague terms.
-            </nitpick>
-            {[{
-                "topic": "subject",
-                "temporal_scope": "time period",
-                "geographic_scope": "location",
-                "evidence_types": ["list", "of", "evidence", "types"],
-                "claims_to_verify": ["list", "of", "claims", "that", "include", "topic", "in", "description"]
-            },
-            {
-                "topic": "second subject",
-                "temporal_scope": "time period for second subject",
-                "geographic_scope": "location",
-                "evidence_types": ["list", "of", "evidence", "types"],
-                "claims_to_verify": ["list", "of", "claims", "that", "include", "topic", "in", "description"]
-            }]}
-        """
-        
-        raw_response = await self.llm_manager.get_string_response(prompt=prompt)
+2. Return a JSON object with this structure using the analysis given:
+   [{
+     "topic": "subject",
+     "temporal_scope": "time period",
+     "geographic_scope": "location",
+     "evidence_types": ["list", "of", "evidence", "types"],
+     "claims_to_verify": ["list", "of", "claims", "that", "include", "topic", "geographic", "temporal", "in", "description"]
+   }]
+
+Important:
+- Claims must not use words like "it", "this", "that", "they", "them" to refer to the query or topic
+- Specify the topic explicitly in place of vague terms
+- Claims must strictly adhere to the query, topic, geographic and timeline constraints"""
+
+        raw_response = await self.llm_manager.get_string_response(
+            prompt=query,
+            system_prompt=system_prompt
+        )
         analysis = await self._parse_json_response(raw_response)
-        # logger.info(f"Query analysis for {query}: {analysis}")
         
         # Ensure analysis is a list
         if isinstance(analysis, dict):
@@ -133,7 +117,7 @@ Respond with only a JSON array of strings.""".format(item.get('query', ''))
         return mapped_results
         
     
-    async def analyze_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> List[Dict[str, Any]]:
+    async def analyze_queries(self, data_items: List[Dict[str, Any]], config: Dict[str, Any] = {}) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Analyze multiple queries to identify key components in parallel.
         
@@ -141,16 +125,13 @@ Respond with only a JSON array of strings.""".format(item.get('query', ''))
             data_items: List of queries or dictionaries containing queries
             config: Optional configuration parameters
             
-        Returns:
-            List of dictionaries containing query analysis and metadata
+        Yields:
+            Dictionaries containing query analysis and metadata
         """
-        # logger.info(f"Analyzing {len(data_items)} queries")
-        tasks = [self._analyze_single_query(item, config) for item in data_items]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        flattened_results = [item for sublist in results for item in sublist]
-        
-        # Handle any exceptions
-        return flattened_results
+        for item in data_items:
+            analysis = await self._analyze_single_query(item, config)
+            for result in analysis:
+                yield result
 
     async def _parse_json_response(self, response: str) -> Union[List[str], Dict[str, Any]]:
         """Parse a JSON response from the LLM."""
