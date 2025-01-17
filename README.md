@@ -2,6 +2,8 @@
 
 A sophisticated research assistant powered by AI that helps users conduct thorough research using Wikipedia data with fact-checking capabilities.
 
+[Screencast from 2025-01-17 01:54:51 PM.webm](https://github.com/user-attachments/assets/75748da0-f24f-4095-94f9-bbda81a75427)
+
 ## Key Features
 
 - **Advanced Query Processing**: Intelligent decomposition of complex research queries into focused sub-queries for comprehensive coverage
