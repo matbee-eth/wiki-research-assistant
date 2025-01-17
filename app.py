@@ -1,5 +1,6 @@
 # app.py
 
+from concurrent.futures import process
 import streamlit as st
 import asyncio
 import logging
@@ -15,6 +16,7 @@ from llm_manager import LLMManager
 from pipelines.query_processor import QueryProcessor
 from pipelines.fact_checker import FactChecker
 from data_sources import DataSources
+from chat_thread import ChatThreadManager
 
 # Load environment variables
 load_dotenv()
@@ -96,11 +98,16 @@ class SearchRequestProcessor:
         """Initialize the search request processor."""
         self.llm_manager = None
         self.pipeline = None
-
+        self.chat_manager = None
+    
     async def __aenter__(self):
         """Initialize async resources."""
         self.llm_manager = LLMManager()
         await self.llm_manager.__aenter__()
+        self.chat_manager = st.session_state.get('chat_manager')
+        if not self.chat_manager:
+            self.chat_manager = ChatThreadManager()
+            st.session_state.chat_manager = self.chat_manager
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -123,22 +130,47 @@ class SearchRequestProcessor:
                 
             # Extract configuration parameters
             config = {
-                'min_score': request.get('min_score', 0.7),
+                'min_score': request.get('min_score', 0.85),
                 'max_results': request.get('max_results', 10),
             }
             
-            # Create pipeline with config
+            # Create pipeline with config only when processing a request
             self.pipeline = create_pipeline(self.llm_manager, config)
-            self.pipeline.append(query)
+            self.pipeline.append({"query": query})
+            
+            # Get current chat thread
+            thread = self.chat_manager.get_thread("default")
+            
+            # Add user message to thread
+            thread.add_message(
+                role="user",
+                content=request.get("query", ""),
+                metadata={"type": "search_request"}
+            )
             
             async for processed_result in self.pipeline.process_queue():
                 logger.info(f"Processed result: {processed_result} - {processed_result.get('step')}")
+                
+                # Store pipeline results in thread
+                if processed_result.get("final_result"):
+                    thread.add_message(
+                        role="assistant",
+                        content=processed_result.get("response", ""),
+                        pipeline_results=processed_result,
+                        metadata={"type": "pipeline_result"}
+                    )
                 yield processed_result
             
             # Set processing to False after pipeline finishes
             st.session_state.processing = False
                 
         except Exception as e:
+            logger.error(f"Error processing request: {e}")
+            thread.add_message(
+                role="system",
+                content=f"Error processing request: {str(e)}",
+                metadata={"type": "error"}
+            )
             yield {
                 'type': 'error',
                 'message': f"Error processing request: {str(e)}"
@@ -186,13 +218,16 @@ async def main():
             # Create interface for streaming updates
             interface = StreamInterface()
             
+            # Create search request with min_score
+            request = {
+                'query': query,
+                'min_score': min_score  # Add min_score to request
+            }
+            
             # Run search with progress updates
             async with SearchRequestProcessor() as processor:
                 await interface.stream_research_progress(
-                    processor.process_search_request({
-                        'query': query,
-                        'min_score': min_score
-                    })
+                    processor.process_search_request(request)
                 )
             
             # Reset processing state when done
@@ -207,14 +242,14 @@ async def main():
         st.session_state.processing = False
 
 async def run_tests() -> bool:
-    """Run test suite."""
-    # logger.info("Running tests...")
+    """Run tests for the pipeline."""
+    
+    query = "mulsim attacks in london england"
     item_results = []
-    config = {
-        "limit": 1,
-    }  # Add any necessary config here
-    query = "Any laws that regulate who can own a firearm in canada"
-
+    
+    # Initialize the query generator pipeline
+    query_generator_pipeline = Pipeline()
+    
     # Test LLM Manager initialization
     test_llm = LLMManager()
     # logger.info(" LLM Manager initialization")
@@ -237,24 +272,28 @@ async def run_tests() -> bool:
         # Test Pipeline creation
         # Implement Pydantic in "Pipeline" class to validate output types
         # logger.info(" Pipeline creation")
-        query_generator_pipeline = Pipeline(initial_items=[query], config={"query": query})
-        query_generator_pipeline.add_map("analyze", query_processor.analyze_queries)
+        query_generator_pipeline.add_map("analyze", query_processor.analyze_queries, execution_mode=ExecutionMode.IMMEDIATE)
         # query_generator_pipeline.add_map("decompose", query_processor.decompose_queries)
         # query_generator_pipeline.add_map("enrich", query_processor.enrich_queries)
 
         # wikipedia_query_pipeline = Pipeline()
-        query_generator_pipeline.add_map("search", test_sources.stream_search_wikipedia, execution_mode=ExecutionMode.ALL)
-        query_generator_pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.ALL)
-        query_generator_pipeline.add_filter("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.ALL)
+        query_generator_pipeline.add_map("search", test_sources.stream_search_wikipedia, execution_mode=ExecutionMode.IMMEDIATE)
+        # query_generator_pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.ALL)
+        query_generator_pipeline.add_filter("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.IMMEDIATE)
         # query_generator_pipeline.add_pipeline("wikipedia", wikipedia_query_pipeline)
         
+        query_generator_pipeline.append({"query": query})
         # Process the queue
         async for processed_result in query_generator_pipeline.process_queue():
-            if (processed_result.get('is_final') == True):
-                item_results.append(processed_result)
+            # if (processed_result.get('is_final') == True):
+            try:
+                item_results.append({ "summary": processed_result.get('data', [["t"]])[0]["summary"], "step": processed_result.get('step') })
+            except Exception as e:
+                item_results.append({ "summary": processed_result.get('data'), "step": processed_result.get('step') })
+                logger.error(f"Error processing result: {e}")
 
         # logger.info("All tests passed successfully!")
-        # logger.info(f"Item results: {item_results}")
+        logger.info(f"Item results: {item_results}")
         return True
 
 if __name__ == "__main__":

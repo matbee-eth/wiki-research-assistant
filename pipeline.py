@@ -166,13 +166,32 @@ class Pipeline:
         if self.pipeline_config.auto_process and initial_items:
             asyncio.create_task(self._auto_process())
             
-    async def _auto_process(self) -> None:
-        """Automatically process queued items when auto_process is enabled."""
-        async for result in self.process_queue():
-            # In auto-process mode, we just discard results
-            # Users should use process_queue() directly if they need results
-            pass
+    async def initialize(self):
+        """Initialize async resources."""
+        # Initialize any async resources needed by steps
+        for step in self.steps:
+            if hasattr(step.func, '__aenter__'):
+                try:
+                    await step.func.__aenter__()
+                except Exception as e:
+                    logger.error(f"Error initializing step {step.name}: {str(e)}", exc_info=True)
+        return self
             
+    async def __aenter__(self):
+        """Enter async context."""
+        await self.initialize()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit async context."""
+        # Clean up any resources
+        for step in self.steps:
+            if hasattr(step.func, '__aexit__'):
+                try:
+                    await step.func.__aexit__(None, None, None)
+                except Exception as e:
+                    logger.error(f"Error cleaning up step {step.name}: {str(e)}", exc_info=True)
+                    
     def __len__(self) -> int:
         """Return number of items in queue."""
         return len(self.queue)
@@ -264,85 +283,155 @@ class Pipeline:
             self.is_processing = False
     
     async def execute(self, input_data: List[Any]) -> AsyncGenerator[Dict[str, Any], None]:
-        if not isinstance(input_data, list):
-            raise TypeError("Pipeline input must be a list")
-
+        """
+        Process data through pipeline steps.
+        
+        For immediate mode steps, results will be processed in parallel as they arrive.
+        For all mode steps, we'll wait for all results before proceeding.
+        """
         current_data = input_data
+        step_queues = []  # Queue for each step
+        step_tasks = []  # Tasks for each step
+        results_queue = asyncio.Queue()
 
-        def chunk_results(results: List[Any], size: int) -> List[List[Any]]:
-            """Split results into chunks of specified size."""
-            return [results[i:i + size] for i in range(0, len(results), size)]
-
-        for i, step in enumerate(self.steps):
-            if not step.enabled:
-                continue
-
-            try:
-                logger.info(f"Processing {len(current_data)} items in step {step.name} with {step.batch_config.execution_mode.value} mode")
+        async def process_step_result(step_idx: int, result: Any, next_queue: Optional[asyncio.Queue] = None):
+            """Process a single result from a step and optionally forward it to next step."""
+            if result:  # Skip empty results
+                result = result if isinstance(result, list) else [result]
                 
-                if step.step_type == StepType.PIPELINE:
-                    async for result in step.func(current_data, step.config):
-                        # Preserve child pipeline metadata and add parent context
-                        if isinstance(result, dict):
-                            result.update({
-                                'parent_step': step.name,
-                                'step': result.get('step', step.name),
-                                'is_final': result.get('is_final', False),
-                                'type': result.get('type', StepType.PIPELINE.value),
-                                'mode': result.get('mode', step.batch_config.execution_mode.value)
-                            })
-                        yield result
-                        if isinstance(result, dict) and 'data' in result:
-                            current_data = result['data'] if isinstance(result['data'], list) else [result['data']]
-                else:
-                    all_results = []
-                    async for result in step.func(current_data, step.config):
-                        if result:  # Skip empty results
-                            result = result if isinstance(result, list) else [result]
-                            all_results.extend(result)
-                            
-                            # For immediate mode, yield each result as it comes
-                            if step.batch_config.execution_mode == ExecutionMode.IMMEDIATE:
-                                yield {
-                                    'step': step.name,
-                                    'data': result,
-                                    'type': step.step_type.value,
-                                    'mode': step.batch_config.execution_mode.value,
-                                    'is_final': i == len(self.steps) - 1,
-                                    'total_items': len(current_data)
-                                }
-                    
-                    # For ALL mode, yield all results at once
-                    if step.batch_config.execution_mode == ExecutionMode.ALL:
-                        yield {
-                            'step': step.name,
-                            'data': all_results,
-                            'type': step.step_type.value,
-                            'mode': step.batch_config.execution_mode.value,
-                            'is_final': i == len(self.steps) - 1,
-                            'progress': 1.0,
-                            'total_items': len(current_data)
-                        }
-                    yield {
-                        'step': step.name,
-                        'type': step.step_type.value,
-                        'mode': step.batch_config.execution_mode.value,
-                        'is_final': i == len(self.steps) - 1,
-                        'progress': 1.0,
-                        'total_items': len(current_data)
-                    }
-                    # Update current_data for next step
-                    current_data = all_results if all_results else current_data
-
-            except Exception as e:
-                logger.error(f"Error in pipeline step {step.name}: {str(e)}", exc_info=True)
-                yield {
-                    'step': step.name,
-                    'error': str(e),
-                    'data': current_data,
-                    'type': step.step_type.value,
-                    'mode': step.batch_config.execution_mode.value
+                # Create result dict with metadata
+                result_dict = {
+                    'step': self.steps[step_idx].name,
+                    'data': result,
+                    'type': self.steps[step_idx].step_type.value,
+                    'mode': self.steps[step_idx].batch_config.execution_mode.value,
+                    'is_final': step_idx == len(self.steps) - 1
                 }
+                
+                # Put result in results queue for yielding
+                await results_queue.put(result_dict)
+                
+                # If there's a next step, put each result individually for immediate mode
+                if next_queue is not None:
+                    next_step = self.steps[step_idx + 1]
+                    if next_step.batch_config.execution_mode == ExecutionMode.IMMEDIATE:
+                        # For immediate mode, send each item individually
+                        for item in result:
+                            await next_queue.put([item])
+                    else:
+                        # For ALL mode, send the entire batch
+                        await next_queue.put(result)
+                        
+        async def process_step(step_idx: int, step: PipelineStep, input_queue: asyncio.Queue, next_queue: Optional[asyncio.Queue] = None):
+            """Process all items from input queue through a single step."""
+            try:
+                while True:
+                    try:
+                        # Get next batch of items from input queue
+                        batch = []
+                        
+                        # Get first item
+                        try:
+                            data = await input_queue.get()
+                            batch.extend(data)
+                            input_queue.task_done()
+                            
+                            # If immediate mode, process this item right away
+                            if step.batch_config.execution_mode == ExecutionMode.IMMEDIATE:
+                                # Try to get more items that arrived while processing
+                                while not input_queue.empty():
+                                    try:
+                                        more_data = input_queue.get_nowait()
+                                        batch.extend(more_data)
+                                        input_queue.task_done()
+                                    except asyncio.QueueEmpty:
+                                        break
+                        except asyncio.CancelledError:
+                            break
+                        
+                        if not batch:
+                            continue
+                            
+                        # Process the batch
+                        if step.step_type == StepType.PIPELINE:
+                            async for result in step.func(batch, step.config):
+                                await process_step_result(step_idx, result, next_queue)
+                        else:
+                            async for result in step.func(batch, step.config):
+                                await process_step_result(step_idx, result, next_queue)
+                                
+                    except asyncio.CancelledError:
+                        break
+                        
+            except Exception as e:
+                logger.error(f"Error in step {step.name}: {str(e)}", exc_info=True)
+            finally:
+                if hasattr(step.func, '__aexit__'):
+                    try:
+                        await step.func.__aexit__(None, None, None)
+                    except Exception as e:
+                        logger.error(f"Error cleaning up step {step.name}: {str(e)}", exc_info=True)
+
+        try:
+            # Create queues for each step
+            for i in range(len(self.steps)):
+                step_queues.append(asyncio.Queue())
+            
+            # Create tasks for each step
+            for i, step in enumerate(self.steps):
+                if not step.enabled:
+                    continue
+                    
+                # Get input and output queues for this step
+                input_queue = step_queues[i]
+                next_queue = step_queues[i + 1] if i < len(self.steps) - 1 else None
+                
+                # Create and start task for this step
+                task = asyncio.create_task(process_step(i, step, input_queue, next_queue))
+                step_tasks.append(task)
+            
+            # Put initial data in first queue
+            if self.steps and self.steps[0].batch_config.execution_mode == ExecutionMode.IMMEDIATE:
+                # For immediate mode, send each item individually
+                for item in current_data:
+                    await step_queues[0].put([item])
+            else:
+                # For ALL mode, send the entire batch
+                await step_queues[0].put(current_data)
+            
+            # Process results as they arrive
+            while True:
+                try:
+                    # Check if all steps are done and queues are empty
+                    all_done = True
+                    for i, queue in enumerate(step_queues):
+                        if not queue.empty() or any(not t.done() for t in step_tasks):
+                            all_done = False
+                            break
+                    
+                    if all_done and results_queue.empty():
+                        break
+                        
+                    # Get and yield next result
+                    try:
+                        result = await asyncio.wait_for(results_queue.get(), timeout=0.1)
+                        yield result
+                    except asyncio.TimeoutError:
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Error processing results: {str(e)}", exc_info=True)
+                    break
+                    
+        finally:
+            # Cancel all tasks
+            for task in step_tasks:
+                if not task.done():
+                    task.cancel()
+                    
+            # Wait for tasks to complete
+            await asyncio.gather(*step_tasks, return_exceptions=True)
+
     def add_pipeline(self, name: str, pipeline: 'Pipeline', enabled: bool = True) -> None:
         """
         Add another pipeline as a step.
@@ -426,3 +515,10 @@ class Pipeline:
         self.config = config
         for step in self.steps:
             step.config = config.get(step.name, {})
+
+    async def _auto_process(self) -> None:
+        """Automatically process queued items when auto_process is enabled."""
+        async for result in self.process_queue():
+            # In auto-process mode, we just discard results
+            # Users should use process_queue() directly if they need results
+            pass

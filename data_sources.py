@@ -1,17 +1,12 @@
 # data_sources.py
 
-import os
-import json
-import string
 import aiohttp
 import asyncio
 import re
-import html
 import mwparserfromhell
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from txtai.embeddings import Embeddings
 import logging
-from creole import creole2html
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -40,28 +35,24 @@ class DataSources:
         pass  # No need to set up logging again, using module-level logger
 
     async def __aenter__(self):
-        """Async context manager entry."""
+        """Enter async context."""
         if not self.session:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True))
         if not self.embeddings:
             self.embeddings = await self._init_embeddings()
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        try:
-            if self.session and not self.session.closed:
-                logger.debug("Closing data sources session...")
-                await self.session.close()
-                logger.debug("Session closed")
+        """Exit async context."""
+        if self.session:
+            # Add delay to ensure all requests complete
+            await asyncio.sleep(0.5)
+            await self.session.close()
+            self.session = None
             
-            # Clean up embeddings if needed
-            if self.embeddings:
-                logger.debug("Cleaning up embeddings...")
-                self.embeddings = None
-                
-        except Exception as e:
-            logger.error(f"Error closing data sources session: {str(e)}", exc_info=True)
+        # Clean up embeddings
+        if self.embeddings:
+            self.embeddings = None
 
     async def _init_embeddings(self):
         """Initialize embeddings asynchronously."""
@@ -409,94 +400,109 @@ class DataSources:
         seen_articles = set()
         
         try:
-            # Ensure session is initialized
-            if not self.session:
-                self.session = aiohttp.ClientSession()
-            
-            for query_item in queries:
-                if not query_item:
-                    logger.error("No query provided")
-                    continue
-                
-                query = query_item.get('query', '')
-                if not query:
-                    logger.error("No query provided")
-                    continue
+            async with self as data_sources:
+                for query_item in queries:
+                    if not query_item:
+                        logger.error("No query provided")
+                        continue
                     
-                search_config = config or {}
-                min_percentile = search_config.get('min_percentile', 0.0)
-                limit = search_config.get('limit', 100)
-                
-                # Initialize embeddings if needed
-                if self.embeddings is None:
-                    self.initialize()
-                
-                if not self.embeddings:
-                    logger.error("Failed to initialize embeddings")
-                    return
-                
-                # Search using embeddings
-                raw_results = self.embeddings.search(query, limit=limit)
-                
-                # Process each article
-                for result in raw_results:
-                    score = float(result.get('score', 0.0))
-                    if score < min_score:
+                    query = query_item.get('query', '')
+                    if not query:
+                        logger.error("No query provided")
                         continue
                         
-                    article_id = result.get('id', '')
-                    if article_id in seen_articles:
-                        continue
-                    seen_articles.add(article_id)
+                    search_config = config or {}
+                    min_percentile = search_config.get('min_percentile', 0.0)
+                    limit = search_config.get('limit', 100)
                     
-                    try:
-                        # Check cache first
-                        article_data = self._get_cached_article(article_id)
-                        if not article_data:
-                            # Fetch and cache if not found
-                            article_data = await self.get_full_wikipedia_page(article_id)
-                            if article_data:
-                                self._cache_article(article_id, article_data)
-                        
-                        if not article_data:
+                    # Initialize embeddings if needed
+                    if data_sources.embeddings is None:
+                        data_sources.initialize()
+                    
+                    if not data_sources.embeddings:
+                        logger.error("Failed to initialize embeddings")
+                        return
+                    
+                    # Search using embeddings
+                    raw_results = data_sources.embeddings.search(query, limit=limit)
+                    
+                    # Create tasks for fetching articles asynchronously
+                    tasks = []
+                    for result in raw_results:
+                        score = float(result.get('score', 0.0))
+                        if score < min_score:
                             continue
+                            
+                        article_id = result.get('id', '')
+                        if article_id in seen_articles:
+                            continue
+                        seen_articles.add(article_id)
                         
-                        # Clean and render the wiki content
-                        article_data = self.render_wiki_content(article_data)
-                        
-                        # Extract a summary from the introduction section
-                        intro_section = next((s for s in article_data["sections"] if s["level"] == 0 and s["title"] == "Introduction"), None)
-                        summary = intro_section["content"] if intro_section else ""
-                        
-                        # Clean up the summary by removing templates
-                        summary = re.sub(r'\{\{[^}]*\}\}', '', summary)  # Remove templates
-                        summary = re.sub(r'\[\[[^\]]*\|([^\]]*)\]\]', r'\1', summary)  # Clean up links
-                        summary = re.sub(r'\[\[([^\]]*)\]\]', r'\1', summary)  # Clean up remaining links
-                        summary = re.sub(r'<[^>]+>', '', summary)  # Remove HTML tags
-                        summary = re.sub(r'\s+', ' ', summary).strip()  # Clean up whitespace
-                        
-                        yield {
-                            **query_item,
-                            'article_id': article_id,
-                            'title': article_data['title'],
-                            'url': article_data['url'],
-                            'score': score,
-                            'document': article_data['content'],
-                            'summary': summary,
-                            'sections': article_data['sections'],
-                            'categories': article_data['categories'],
-                            'timestamp': article_data['timestamp']
-                        }
-                    except ValueError as e:
-                        logger.warning(f"Could not fetch article {article_id}: {str(e)}")
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error processing article {article_id}: {str(e)}", exc_info=True)
-                        continue
+                        # Create task for fetching article
+                        tasks.append(data_sources._fetch_article_task(query_item, article_id, score))
+                    # Process tasks as they complete
+                    for task in asyncio.as_completed(tasks):
+                        try:
+                            result = await task
+                            if result:
+                                yield result
+                        except Exception as e:
+                            logger.warning(f"Error processing article: {str(e)}")
+                            await asyncio.sleep(0.1)  # Sleep for 100ms even if there's an error
+                            continue
                     
+                    # Wait for all tasks to complete
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        
         except Exception as e:
             logger.error(f"Error in stream_search_wikipedia: {str(e)}", exc_info=True)
             raise
+
+    async def _fetch_article_task(self, query_item: Dict[str, Any], article_id: str, score: float) -> Dict[str, Any]:
+        """Helper method to fetch and process a single article."""
+        try:
+
+            # Check cache first
+            article_data = self._get_cached_article(article_id)
+            if not article_data:
+                # Fetch and cache if not found
+                article_data = await self.get_full_wikipedia_page(article_id)
+                if article_data:
+                    self._cache_article(article_id, article_data)
+            
+            if not article_data:
+                return None
+            
+            # Clean and render the wiki content
+            article_data = self.render_wiki_content(article_data)
+            
+            # Extract a summary from the introduction section
+            intro_section = next((s for s in article_data["sections"] if s["level"] == 0 and s["title"] == "Introduction"), None)
+            summary = intro_section["content"] if intro_section else ""
+            
+            # Clean up the summary by removing templates
+            summary = re.sub(r'\{\{[^}]*\}\}', '', summary)  # Remove templates
+            summary = re.sub(r'\[\[[^\]]*\|([^\]]*)\]\]', r'\1', summary)  # Clean up links
+            summary = re.sub(r'\[\[([^\]]*)\]\]', r'\1', summary)  # Clean up remaining links
+            summary = re.sub(r'<[^>]+>', '', summary)  # Remove HTML tags
+            summary = re.sub(r'\s+', ' ', summary).strip()  # Clean up whitespace
+            
+            return {
+                **query_item,
+                'article_id': article_id,
+                'title': article_data['title'],
+                'url': article_data['url'],
+                'score': score,
+                'document': article_data['content'],
+                'summary': summary,
+                'sections': article_data['sections'],
+                'categories': article_data['categories'],
+                'timestamp': article_data['timestamp']
+            }
+        except ValueError as e:
+            logger.warning(f"Could not fetch article {article_id}: {str(e)}")
+            return None
 
     def _wiki_to_html(self, text: str) -> str:
         """

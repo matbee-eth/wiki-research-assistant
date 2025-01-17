@@ -95,8 +95,24 @@ Question: [A non-vague, directed, Yes/No question that can be fact-checked again
     async def _create_validation_prompt(self, claim: str, document: str) -> str:
         """Create the prompt for claim validation."""
         logger.debug(f"Creating validation prompt for claim: {claim}")
-        prompt = f"""Document: {document}
+        prompt = f"""Document:
+```{document}```
+
+
 Claim: {claim}
+"""
+        return prompt
+    
+    async def _create_validation_system_prompt(self, claim: str, document: str) -> str:
+        """Create the system prompt for claim validation."""
+        logger.debug(f"Creating validation system prompt for claim: {claim}")
+        prompt = f"""You are a fact-checking assistant that verifies claims against documents and a given claim.
+Your task is to determine if the claim is related to the document by responding by either Yes or No.
+Your response must be in ONE of these formats:
+Yes: [The claim is related to the document]
+No: [The claim is not related to the document]
+
+You must ONLY respond with Yes or No
 """
         return prompt
 
@@ -116,7 +132,8 @@ Claim: {claim}
                 }
             
             prompt = await self._create_validation_prompt(claim, document)
-            validation = await self.llm_manager.get_string_response(prompt=prompt, model="bespoke-minicheck")
+            system_prompt = await self._create_validation_system_prompt(claim, document)
+            validation = await self.llm_manager.get_string_response(system_prompt=system_prompt, prompt=prompt, model="phi4")
             logger.debug(f"Validation result for claim: {claim} - {validation}")
             # Return just the validation result
             return {
@@ -140,7 +157,7 @@ Claim: {claim}
         """
         config = config or {}
         
-        logger.debug(f"Validating {len(items)} claims")
+        logger.info(f"Validating {len(items)} claims")
         for item in items:
             document = item.get('summary', '')
             if not document:
@@ -149,11 +166,18 @@ Claim: {claim}
                 
             # Get claims to verify from analysis or use the document content
             claims_to_verify = []
+            mandatory_claims = []
             if 'analysis' in item and isinstance(item['analysis'], dict):
                 claims_to_verify = item['analysis'].get('claims_to_verify', [])
+                mandatory_claims = item['analysis'].get('mandatory_claims_to_verify', [])
+                
+                # If mandatory claims are present but empty, skip validation
+                if 'mandatory_claims_to_verify' in item['analysis'] and not mandatory_claims:
+                    logger.error("Mandatory claims are required but none were provided")
+                    continue
             
             # If no claims in analysis, generate a claim from the document
-            if not claims_to_verify:
+            if not claims_to_verify and not mandatory_claims:
                 try:
                     claim = await self._generate_single_claim(item, config)
                     if claim:
@@ -162,13 +186,33 @@ Claim: {claim}
                     logger.error(f"Error generating claim: {str(e)}")
                     continue
             
-            if not claims_to_verify:
+            if not claims_to_verify and not mandatory_claims:
                 logger.error("No claims available for validation")
                 continue
             
             # Validate all claims
             validations = []
             valid_count = 0
+            total_claims = len(claims_to_verify) + len(mandatory_claims)
+            
+            # First validate mandatory claims - all must pass
+            for claim_to_verify in mandatory_claims:
+                try:
+                    logger.debug(f"Validating mandatory claim: {claim_to_verify}")
+                    prompt = await self._create_validation_prompt(claim_to_verify, document)
+                    validation = await self.llm_manager.get_string_response(prompt=prompt, model="bespoke-minicheck")
+                    logger.debug(f"Validation result for mandatory claim: {claim_to_verify} - {validation}")
+                    
+                    if validation != 'Yes':
+                        logger.error(f"Mandatory claim validation failed: {claim_to_verify}")
+                        return
+                    valid_count += 1
+                    validations.append((claim_to_verify, validation))
+                except Exception as e:
+                    logger.error(f"Error validating mandatory claim: {str(e)}")
+                    return
+
+            # Then validate optional claims
             for claim_to_verify in claims_to_verify:
                 try:
                     logger.debug(f"Validating claim: {claim_to_verify}")
@@ -177,15 +221,14 @@ Claim: {claim}
                     logger.debug(f"Validation result for claim: {claim_to_verify} - {validation}")
                     
                     if validation == 'Yes':
-                        if valid_count == 0:
-                            validations.append((claim_to_verify, validation))
                         valid_count += 1
+                        validations.append((claim_to_verify, validation))
                 except Exception as e:
                     logger.error(f"Error validating claim: {str(e)}")
                     validations.append((claim_to_verify, "Error"))
 
             # Calculate validation rate
-            validation_rate = (valid_count / len(claims_to_verify)) * 100 if claims_to_verify else 0
+            validation_rate = (valid_count / total_claims) * 100 if total_claims else 0
 
             # Yield results if at least one validation passes
             if valid_count > 0:
