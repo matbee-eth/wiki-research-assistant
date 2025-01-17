@@ -35,6 +35,7 @@ ENV/
 
 # Project specific
 article_cache/
+cache/
 *.log
 .streamlit/secrets.toml
 

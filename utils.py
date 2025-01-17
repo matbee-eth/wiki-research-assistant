@@ -99,7 +99,7 @@ OPENAI_SEMAPHORE = asyncio.Semaphore(5)  # Limit concurrent API calls
 
 @log_function_call
 @retry_on_error
-async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperature=0.3, stream=False):
+async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperature=0.9, stream=False, system_prompt=None):
     """
     Fetch response from GPT API.
     
@@ -110,6 +110,7 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
         temperature: Temperature parameter
         max_tokens: Maximum tokens to generate
         stream: Whether to stream the response
+        system_prompt: Optional system prompt to set context/behavior
         
     Returns:
         str: Generated response
@@ -119,9 +120,14 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "temperature": temperature,
     }
     if max_tokens is not None:
@@ -138,40 +144,72 @@ async def fetch_gpt_response(session, prompt, max_tokens, model="phi4", temperat
             
             if response.status == 200:
                 if not stream:
-                    data = await response.json()
-                    logger.debug(f"API response data: {json.dumps(data, indent=2)}")
-                    content = data['choices'][0]['message']['content'].strip()
-                    logger.debug(f"Extracted content: {content}")
-                    return content
+                    try:
+                        data = await response.json()
+                        # logger.debug(f"API response data: {json.dumps(data, indent=2)}")
+                        if isinstance(data, dict) and 'choices' in data:
+                            content = data['choices'][0]['message']['content'].strip()
+                            logger.debug(f"Extracted content: {content}")
+                            return content
+                        else:
+                            # Handle Ollama-style response
+                            if isinstance(data, dict) and 'response' in data:
+                                content = data['response'].strip()
+                                logger.debug(f"Extracted Ollama content: {content}")
+                                return content
+                            logger.error(f"Unexpected response format: {data}")
+                            return None
+                    except json.JSONDecodeError as e:
+                        # Try to get raw text if JSON parsing fails
+                        text = await response.text()
+                        logger.warning(f"JSON decode error, raw response: {text}")
+                        return text.strip() if text else None
                     
                 async for line in response.content:
                     if line:
                         try:
-                            json_response = json.loads(line.decode('utf-8').strip().strip('data: '))
-                            logger.debug(f"Stream response chunk: {json.dumps(json_response, indent=2)}")
-                            if json_response.get("choices"):
-                                content = json_response["choices"][0].get("delta", {}).get("content", "")
-                                if content:
-                                    logger.debug(f"Stream content chunk: {content}")
-                                    return content
-                        except json.JSONDecodeError:
-                            logger.warning("Failed to parse stream response chunk")
+                            line_text = line.decode('utf-8').strip()
+                            if line_text.startswith('data: '):
+                                line_text = line_text[6:].strip()
+                            if not line_text:
+                                continue
+                                
+                            try:
+                                json_response = json.loads(line_text)
+                                if isinstance(json_response, dict):
+                                    if 'choices' in json_response:
+                                        content = json_response["choices"][0].get("delta", {}).get("content", "")
+                                        if content:
+                                            return content
+                                    elif 'response' in json_response:
+                                        content = json_response['response'].strip()
+                                        if content:
+                                            return content
+                            except json.JSONDecodeError:
+                                # If it's not JSON, treat it as raw text
+                                if line_text:
+                                    return line_text
+                                    
+                        except Exception as e:
+                            logger.warning(f"Error processing stream chunk: {str(e)}")
                             continue
+                            
             elif response.status == 429:
                 logger.warning("Rate limit exceeded. Retrying...")
                 await asyncio.sleep(1)
                 return None
             else:
                 error_text = await response.text()
-                logger.error(f"GPT API Error {response.status}: {error_text}")
+                logger.error(f"API Error {response.status}: {error_text}")
                 return None
+                
     except Exception as e:
         logger.error(f"Error in fetch_gpt_response: {str(e)}", exc_info=True)
         return None
 
 @log_function_call
 @retry_on_error
-async def fetch_gpt_response_parallel(session, prompts, max_tokens=None, model="phi4", temperature=0.3):
+async def fetch_gpt_response_parallel(session, prompts, max_tokens=None, model="phi4", temperature=0.9):
     """
     Fetch responses from GPT API in parallel with rate limiting.
     

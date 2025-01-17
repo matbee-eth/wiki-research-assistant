@@ -3,27 +3,35 @@
 import streamlit as st
 import asyncio
 import logging
-from search_engine import SearchEngine
 from stream_interface import StreamInterface
 from dotenv import load_dotenv
 import os
-from typing import List
+from typing import List, Dict, Any, AsyncGenerator
 import pandas as pd
 from pathlib import Path
 import base64
+from pipeline import ExecutionMode, Pipeline, batch
+from llm_manager import LLMManager
+from pipelines.query_processor import QueryProcessor
+from pipelines.fact_checker import FactChecker
+from data_sources import DataSources
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('research_assistant.log'),
         logging.StreamHandler()
     ]
 )
+
+# Disable watchdog and inotify debug logs
+logging.getLogger('watchdog').setLevel(logging.WARNING)
+logging.getLogger('watchdog.observers.inotify_buffer').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -51,65 +59,211 @@ def export_results(results: List[dict]):
     href = f'<a href="data:file/csv;base64,{b64}" download="search_results.csv" target="_blank">Download Results</a>'
     st.markdown(href, unsafe_allow_html=True)
 
-def main():
-    """Main function to run the Streamlit app."""
+def create_pipeline(llm_manager: LLMManager, config: Dict[str, Any] = None) -> Pipeline:
+    """
+    Create and configure the search pipeline.
+    
+    Args:
+        llm_manager: LLM manager instance for query processing
+        config: Configuration parameters for pipeline steps
+        
+    Returns:
+        Configured pipeline instance
+    """
+    # Create pipeline components
+    query_processor = QueryProcessor(llm_manager)
+    fact_checker = FactChecker(llm_manager)
+    data_sources = DataSources()
+    data_sources.initialize()  # Ensure embeddings are initialized
+    
+    # Create pipeline with initial config
+    pipeline = Pipeline(config=config or {})
+
+    # Add steps with array-based methods
+    pipeline.add_map("analyze", query_processor.analyze_queries, execution_mode=ExecutionMode.IMMEDIATE)
+    pipeline.add_map("decompose", query_processor.decompose_queries, execution_mode=ExecutionMode.IMMEDIATE)
+    pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.IMMEDIATE)
+
+    # pipeline.add_map("enrich", query_processor.enrich_queries)
+    
+    pipeline.add_map("search", data_sources.stream_search_wikipedia, execution_mode=ExecutionMode.IMMEDIATE)
+    pipeline.add_map("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.IMMEDIATE)
+    
+    return pipeline
+
+class SearchRequestProcessor:
+    def __init__(self):
+        """Initialize the search request processor."""
+        self.llm_manager = None
+        self.pipeline = None
+
+    async def __aenter__(self):
+        """Initialize async resources."""
+        self.llm_manager = LLMManager()
+        await self.llm_manager.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Cleanup async resources."""
+        if self.llm_manager:
+            await self.llm_manager.__aexit__(exc_type, exc_val, exc_tb)
+            self.llm_manager = None
+
+    async def process_search_request(self, request: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+        """Process a search request."""
+        try:
+            query = request.get('query')
+            if not query:
+                yield {
+                    'type': 'error',
+                    'message': 'No query provided'
+                }
+                st.session_state.processing = False
+                return
+                
+            # Extract configuration parameters
+            config = {
+                'min_score': request.get('min_score', 0.7),
+                'max_results': request.get('max_results', 10),
+            }
+            
+            # Create pipeline with config
+            self.pipeline = create_pipeline(self.llm_manager, config)
+            self.pipeline.append(query)
+            
+            async for processed_result in self.pipeline.process_queue():
+                logger.info(f"Processed result: {processed_result} - {processed_result.get('step')}")
+                yield processed_result
+            
+            # Set processing to False after pipeline finishes
+            st.session_state.processing = False
+                
+        except Exception as e:
+            yield {
+                'type': 'error',
+                'message': f"Error processing request: {str(e)}"
+            }
+            st.session_state.processing = False
+
+async def main():
     st.set_page_config(page_title="Research Assistant", layout="wide")
+    st.title("Research Assistant")
     
-    # Title and description
-    st.title("🔍 Semantic Research Assistant")
-    st.markdown("Enter your research query below to search across Wikipedia and other sources.")
+    # Initialize session state
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    if 'messages' not in st.session_state:
+        st.session_state.messages = {}
     
-    # Initialize search engine and interface
-    search_engine = SearchEngine()
+    # Sidebar configuration
+    st.sidebar.title("Settings")
+    st.sidebar.header("Pipeline Settings")
+    min_score = st.sidebar.slider("Minimum Score", 0.0, 1.0, 0.72, 0.01)
     
-    # Create main columns for layout
-    col1, col2 = st.columns([5, 1])
+    # <SEARCH>
+    query = st.text_area("Enter your research query:", height=100)
+    
+    # <SEARCH STATUS> and <SEARCH RESULTS>
+    col1, col2 = st.columns([3, 1])
     
     with col1:
-        # Search input
-        query = st.text_input(
-            "Enter your query",
-            placeholder="e.g., What are the major theories of consciousness?",
-            key="search_input"
-        )
-        
-        # Search parameters
-        col_params1, col_params2 = st.columns(2)
-        with col_params1:
-            max_results = st.slider("Maximum Results", min_value=10, max_value=500, value=100, step=10)
-            min_score = st.slider("Minimum Score", min_value=0.0, max_value=1.0, value=0.7, step=0.05)
-        with col_params2:
-            max_variations = st.slider("Query Variations", min_value=1, max_value=5, value=2, step=1)
-            chunk_size = st.slider("Content Length", min_value=100, max_value=1000, value=300, step=100)
-            
-        search_clicked = st.button("🔍 Search", key="search_button")
+        if st.session_state.processing:
+            st.markdown("""
+                <div style="margin-top: 1rem;">
+                    <div class="spinner"></div>
+                    <span style="margin-left: 8px;">Researching...</span>
+                </div>
+            """, unsafe_allow_html=True)
     
-    # Show export button in col2 if we have results
     with col2:
-        st.markdown("<div style='margin-top: 25px;'></div>", unsafe_allow_html=True)
-        if search_engine.get_all_results():
-            st.download_button(
-                label="📥 Export Results",
-                data=search_engine.get_export_data(),
-                file_name="research_results.md",
-                mime="text/markdown",
-                key="export_button"
-            )
+        if not st.session_state.processing:
+            if st.button("Search", type="primary", use_container_width=True):
+                st.session_state.processing = True
     
-    # Handle search if button clicked
-    if search_clicked and query:
-        # Run search with parameters
-        search_generator = search_engine.search(
-            query=query,
-            max_results=max_results,
-            min_score=min_score,
-            max_variations=max_variations,
-            chunk_size=chunk_size
-        )
+    # Show interface if processing
+    if st.session_state.processing and query:
+        try:
+            # Create interface for streaming updates
+            interface = StreamInterface()
+            
+            # Run search with progress updates
+            async with SearchRequestProcessor() as processor:
+                await interface.stream_research_progress(
+                    processor.process_search_request({
+                        'query': query,
+                        'min_score': min_score
+                    })
+                )
+            
+            # Reset processing state when done
+            st.session_state.processing = False
+            
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            st.session_state.processing = False
+            
+    elif st.session_state.processing and not query:
+        st.warning("Please enter a query to start research.")
+        st.session_state.processing = False
+
+async def run_tests() -> bool:
+    """Run test suite."""
+    # logger.info("Running tests...")
+    item_results = []
+    config = {
+        "limit": 1,
+    }  # Add any necessary config here
+    query = "Any laws that regulate who can own a firearm in canada"
+
+    # Test LLM Manager initialization
+    test_llm = LLMManager()
+    # logger.info(" LLM Manager initialization")
+
+    async with test_llm as llm:
+        # Test QueryProcessor
+        query_processor = QueryProcessor(llm)
+        # logger.info(" QueryProcessor initialization")
+
+        # Test DataSources
+        test_sources = DataSources()
+        # logger.info(" DataSources initialization")
         
-        # Create interface and run search
-        interface = StreamInterface()
-        asyncio.run(interface.stream_research_progress(search_generator))
+        test_sources.initialize()  # Ensure embeddings are initialized
+
+        # Test FactChecker
+        fact_checker = FactChecker(llm)
+        # logger.info(" FactChecker initialization")
+        
+        # Test Pipeline creation
+        # Implement Pydantic in "Pipeline" class to validate output types
+        # logger.info(" Pipeline creation")
+        query_generator_pipeline = Pipeline(initial_items=[query], config={"query": query})
+        query_generator_pipeline.add_map("analyze", query_processor.analyze_queries)
+        # query_generator_pipeline.add_map("decompose", query_processor.decompose_queries)
+        # query_generator_pipeline.add_map("enrich", query_processor.enrich_queries)
+
+        # wikipedia_query_pipeline = Pipeline()
+        query_generator_pipeline.add_map("search", test_sources.stream_search_wikipedia, execution_mode=ExecutionMode.ALL)
+        query_generator_pipeline.add_map("generate_claims", fact_checker.generate_claims, execution_mode=ExecutionMode.ALL)
+        query_generator_pipeline.add_filter("validate_claims", fact_checker.validate_claims, execution_mode=ExecutionMode.ALL)
+        # query_generator_pipeline.add_pipeline("wikipedia", wikipedia_query_pipeline)
+        
+        # Process the queue
+        async for processed_result in query_generator_pipeline.process_queue():
+            if (processed_result.get('is_final') == True):
+                item_results.append(processed_result)
+
+        # logger.info("All tests passed successfully!")
+        # logger.info(f"Item results: {item_results}")
+        return True
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test', action='store_true', help='Run in test mode')
+    args = parser.parse_args()
+
+    if args.test:
+        asyncio.run(run_tests())
+    else:
+        asyncio.run(main())
