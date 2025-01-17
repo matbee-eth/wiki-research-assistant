@@ -84,6 +84,7 @@ You must follow these steps:
    - Geographic scope
    - Required evidence types
    - Specific, non-vague, and direct claims to verify against any possibly relevant documents. Used for semantic filtering.
+   - Mandatory claims to verify. Think: "This article contains information about Italy or Spain" or "This article is about Roads in Feudal Japan"
 
 2. Return a JSON object with this structure using the analysis given:
    [{
@@ -91,7 +92,8 @@ You must follow these steps:
      "temporal_scope": "time period",
      "geographic_scope": "location",
      "evidence_types": ["list", "of", "evidence", "types"],
-     "claims_to_verify": ["list", "of", "claims", "that", "include", "topic", "geographic", "temporal", "in", "description"]
+     "claims_to_verify": ["list", "of", "claims", "that", "include", "topic", "geographic", "temporal", "in", "description"],
+     "mandatory_claims_to_verify": ["list", "of", "claims", "that", "include", "topic", "geographic", "temporal", "in", "description"]
    }]
 
 Important:
@@ -128,10 +130,38 @@ Important:
         Yields:
             Dictionaries containing query analysis and metadata
         """
+        tasks = []
         for item in data_items:
-            analysis = await self._analyze_single_query(item, config)
-            for result in analysis:
-                yield result
+            if isinstance(item, str):
+                query = item
+            elif isinstance(item, dict):
+                query = item.get('query', '')
+            else:
+                continue
+
+            if not query:
+                continue
+
+            tasks.append(self._analyze_single_query({"query": query}, config))
+
+        if not tasks:
+            return
+
+        try:
+            analyses = await asyncio.gather(*tasks)
+            for item, analysis_list in zip(data_items, analyses):
+                if not analysis_list:
+                    continue
+                    
+                # Preserve the original item data and add analysis
+                for analysis in analysis_list:
+                    result = item.copy() if isinstance(item, dict) else {"query": item}
+                    result['analysis'] = analysis.get('analysis', {})
+                    yield result
+
+        except Exception as e:
+            logger.error(f"Error analyzing queries: {str(e)}")
+            return
 
     async def _parse_json_response(self, response: str) -> Union[List[str], Dict[str, Any]]:
         """Parse a JSON response from the LLM."""

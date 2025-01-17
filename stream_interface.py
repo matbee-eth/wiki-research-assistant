@@ -6,6 +6,8 @@ import asyncio
 import datetime
 import base64
 import html
+from chat_thread import ChatThreadManager, ChatThread
+from llm_manager import LLMManager
 
 if TYPE_CHECKING:
     from search_engine import SearchEngine
@@ -22,6 +24,16 @@ class StreamInterface:
         # Initialize session state
         if "messages" not in st.session_state:
             st.session_state.messages = {}
+        if "chat_manager" not in st.session_state:
+            st.session_state.chat_manager = ChatThreadManager()
+            # Create a default thread
+            st.session_state.chat_manager.create_thread("default")
+        if "results" not in st.session_state:
+            st.session_state.results = []
+        if "chat_processing" not in st.session_state:
+            st.session_state.chat_processing = False
+        if "chat_messages_queue" not in st.session_state:
+            st.session_state.chat_messages_queue = []
         
         # Initialize state
         self._progress = 0.0
@@ -50,6 +62,9 @@ class StreamInterface:
         # Results section (below progress)
         self._results_container = self._main_container.container()
         self._log_container = self._main_container.container()
+        
+        # Chat section (below results)
+        self._chat_container = self._main_container.container()
         
         # Add loading animations
         self.add_loading_animations()
@@ -224,12 +239,7 @@ class StreamInterface:
         self._received_data_counts = {}
 
     async def stream_research_progress(self, pipeline_generator: AsyncGenerator[Dict[str, Any], None]):
-        """
-        Stream progress updates and results from the pipeline.
-        
-        Args:
-            pipeline_generator: Async generator yielding pipeline updates
-        """
+        """Stream progress updates and results from the pipeline."""
         try:
             # Initialize state for new search
             self._progress = 0.0
@@ -245,7 +255,9 @@ class StreamInterface:
             self._received_data_counts = {}  # Track received data counts per step
             
             async for update in pipeline_generator:
-                # logger.debug(f"Received pipeline update: {update}")
+                if update.get('type') == 'error':
+                    st.error(update.get('message', 'An error occurred'))
+                    continue
                 
                 step = update.get('step', '')
                 progress = update.get('progress', 0)
@@ -286,12 +298,12 @@ class StreamInterface:
                             self._step_expanders[current_step] = main_container.expander(
                                 "Results", 
                                 expanded=(current_step == step)
-                            )
-
+                    )
+                
                         if not current_step in self._step_containers:
                             self._step_containers[current_step] = self._step_expanders[current_step].container()
                 
-                self._step_counts[step] += 1
+                    self._step_counts[step] += 1
                 
                 # Update current step and progress
                 if self._current_step != step:
@@ -317,22 +329,13 @@ class StreamInterface:
                 # Update received count
                 self._received_data_counts[step] += len(data_list)
                 
-                # Update expander label with counts
-                if step in self._step_expanders:
-                    received = self._received_data_counts[step]
-                    expected = self._expected_data_counts.get(step, 0)
-                    count_display = f"{received}"
-                    if expected > 0:
-                        percentage = (received / expected) * 100
-                        count_display = f"{received}/{expected} ({percentage:.1f}%)"
-                    self._step_expanders[step].label = f"Results ({count_display} items)"
                 
                 # Create a fresh container for this batch of results
                 batch_container = self._step_containers[step]
                 
                 # Process items in reverse order so newest appears first
                 for item in data_list:
-                    if isinstance(item, dict) and item.get('article_id') or item.get('url') or item.get('title') or item.get('id'):
+                    if isinstance(item, dict) and (item.get('article_id') or item.get('url') or item.get('title') or item.get('id')):
                         # Get result ID from various possible sources
                         result_id = (
                             item.get('article_id') or 
@@ -349,7 +352,7 @@ class StreamInterface:
                             # Add result message to step log without container
                             title = item.get('title', result_id)
                             self.add_message(f"📄 **Processed**: {step} - {title}", step)
-                    elif isinstance(item, dict) and item.get('query') or item.get('content'):
+                    elif isinstance(item, dict) and (item.get('query') or item.get('content')):
                         # Handle string/simple content
                         content = item.get('query') or item.get('content')
                         if content:
@@ -362,11 +365,11 @@ class StreamInterface:
                             self._results[result_id] = {'content': item}
                             self._display_result({'data': {'content': item}}, batch_container)
                             self.add_message(f"🖋️ **Processed**: {step} - {result_id}", step)
-                    
+                
                 # Update progress display
                 result_count = len(self._results)
                 self._update_status(
-                    step=f"{step} ({len(update.get('data', []))} items)",
+                    step=f"{step} ({len(data_list)} items)",
                     count=result_count,
                     complete=update.get('is_final', False) and update.get('progress', 0) == 1.0
                 )
@@ -380,14 +383,30 @@ class StreamInterface:
                     if step == self._step_order[0]:  # Check first step since order is reversed
                         self.add_message("✨ **All processing completed!**", step)
                         self._update_progress(1.0)
+                        self.display_chat_history()
                 
         except Exception as e:
             logger.error(f"Error in pipeline processing: {str(e)}", exc_info=True)
             if self._current_step:
                 self.add_message(f"❌ **Error**: {str(e)}", self._current_step)
+            st.error(f"Error streaming progress: {str(e)}")
             raise
         finally:
             await self.cleanup()
+
+    def add_results(self, results):
+        """Add results to session state."""
+        if not hasattr(st.session_state, 'results'):
+            st.session_state.results = []
+            
+        # Handle both single result and list of results
+        if isinstance(results, dict):
+            st.session_state.results.append(results)
+            self._results[results.get('id', str(len(self._results)))] = results
+        elif isinstance(results, list):
+            st.session_state.results.extend(results)
+            for result in results:
+                self._results[result.get('id', str(len(self._results)))] = result
 
     def clear_results(self):
         """Clear the current results."""
@@ -407,13 +426,6 @@ class StreamInterface:
             key=lambda x: float(x.get('score', 0)),
             reverse=True
         )
-
-    def add_results(self, results):
-        """Add results to session state."""
-        if not hasattr(st.session_state, 'results'):
-            st.session_state.results = []
-        st.session_state.results.extend(results)
-
 
     def get_export_data(self, results: List[Dict]) -> str:
         """Generate markdown export data from results."""
@@ -892,3 +904,142 @@ class StreamInterface:
                 <span>Processing your request...</span>
             </div>
         """, unsafe_allow_html=True)
+
+    def display_chat_history(self):
+        """Display the chat history in the chat container."""
+        with self._chat_container:
+            st.header("Chat History")
+            
+            # Get the default thread
+            thread = st.session_state.chat_manager.get_thread("default")
+            
+            # Process any queued messages
+            if st.session_state.chat_messages_queue:
+                for msg_data in st.session_state.chat_messages_queue:
+                    thread.add_message(**msg_data)
+                st.session_state.chat_messages_queue = []
+            
+            # Display messages with different styling based on role
+            for msg in thread.messages:
+                with st.container():
+                    # Different background colors for different roles
+                    if msg.role == "user":
+                        st.markdown("""
+                        <div style='background-color: #f0f2f6; padding: 10px; border-radius: 10px; margin: 5px 0;'>
+                            <strong>You:</strong><br>{0}
+                        </div>
+                        """.format(msg.content), unsafe_allow_html=True)
+                    elif msg.role == "assistant":
+                        st.markdown("""
+                        <div style='background-color: #e3f2fd; padding: 10px; border-radius: 10px; margin: 5px 0;'>
+                            <strong>Assistant:</strong><br>{0}
+                        </div>
+                        """.format(msg.content), unsafe_allow_html=True)
+                    elif msg.role == "system":
+                        st.markdown("""
+                        <div style='background-color: #fff3e0; padding: 10px; border-radius: 10px; margin: 5px 0;'>
+                            <strong>System:</strong><br>{0}
+                        </div>
+                        """.format(msg.content), unsafe_allow_html=True)
+                    
+                    # If there are pipeline results, show them in an expander
+                    if msg.pipeline_results:
+                        with st.expander("View Pipeline Results"):
+                            st.json(msg.pipeline_results)
+            
+            # Add chat input
+            chat_input = st.text_input("Chat with Assistant", key="chat_input")
+            
+            # Show processing indicator if chat is being processed
+            if st.session_state.chat_processing:
+                st.info("Processing your message...")
+            
+            # Handle send button click
+            if st.button("Send", key="send_chat", disabled=st.session_state.chat_processing):
+                if chat_input:
+                    # Queue the user message
+                    st.session_state.chat_messages_queue.append({
+                        'role': "user",
+                        'content': chat_input,
+                        'metadata': {"type": "chat"}
+                    })
+                    
+                    # Get context from previous messages and results
+                    context = self.get_chat_context(thread)
+                    
+                    # Set processing flag
+                    st.session_state.chat_processing = True
+                    
+                    # Process chat with LLM
+                    asyncio.create_task(self.process_chat_message(thread, chat_input, context))
+                    
+                    # Clear input (using session state to persist across reruns)
+                    st.session_state.chat_input = ""
+
+    def get_chat_context(self, thread) -> str:
+        """Get context for chat from thread history and results."""
+        context_parts = []
+        
+        # Add recent results if available
+        results = self.get_results()
+        if results:
+            context_parts.append("Recent search results:")
+            for result in results[:3]:  # Include top 3 results
+                title = result.get('title', '')
+                content = result.get('content', '')
+                if title and content:
+                    context_parts.append(f"- {title}: {content[:200]}...")
+        
+        # Add recent messages
+        messages = thread.messages[-5:]  # Last 5 messages
+        if messages:
+            context_parts.append("\nRecent conversation:")
+            for msg in messages:
+                context_parts.append(f"{msg.role}: {msg.content}")
+        
+        return "\n".join(context_parts)
+
+    async def process_chat_message(self, thread, user_message: str, context: str):
+        """Process a chat message with the LLM."""
+        try:
+            # Create system prompt with context
+            system_prompt = f"""You are a helpful research assistant. Use the following context to inform your responses:
+            
+{context}
+
+Respond in a helpful and informative way, using the context when relevant."""
+            
+            # Get LLM response
+            async with LLMManager() as llm:
+                response = await llm.get_response(
+                    prompt=user_message,
+                    system_prompt=system_prompt,
+                    temperature=0.7
+                )
+            
+            if response:
+                # Queue the assistant response
+                st.session_state.chat_messages_queue.append({
+                    'role': "assistant",
+                    'content': response,
+                    'metadata': {"type": "chat_response"}
+                })
+            else:
+                # Queue error message
+                st.session_state.chat_messages_queue.append({
+                    'role': "system",
+                    'content': "Failed to get response from assistant",
+                    'metadata': {"type": "error"}
+                })
+                
+        except Exception as e:
+            logger.error(f"Error processing chat message: {str(e)}")
+            # Queue error message
+            st.session_state.chat_messages_queue.append({
+                'role': "system",
+                'content': f"Error: {str(e)}",
+                'metadata': {"type": "error"}
+            })
+        finally:
+            # Clear processing flag
+            st.session_state.chat_processing = False
