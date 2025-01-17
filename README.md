@@ -1,87 +1,96 @@
-# Semantic Research Assistant
+# Wiki Research Assistant
 
-A powerful research tool that leverages AI to search, analyze, and generate literature reviews from Wikipedia articles.
+A sophisticated research assistant powered by AI that helps users conduct thorough research using Wikipedia data with fact-checking capabilities.
 
-[Screencast from 2025-01-15 12:35:52 PM (trimmed).webm](https://github.com/user-attachments/assets/bd288b53-90ef-48e4-9200-5a2b7339fbb3)
+## Key Features
 
-## Features
+- **Advanced Query Processing**: Intelligent decomposition of complex research queries into focused sub-queries for comprehensive coverage
+- **Real-time Fact Checking**: Automated claim generation and validation against source documents
+- **Interactive Streaming Interface**: Real-time progress updates and interactive chat interface built with Streamlit
+- **Pipeline Architecture**: Modular and extensible pipeline system for processing research queries
+- **LLM Integration**: Leverages state-of-the-art language models for query analysis and fact checking
 
-- **Semantic Search**: Search Wikipedia articles using natural language queries with semantic understanding
-- **Real-time Analysis**: Get instant analysis of articles as they are processed
-- **Individual Literature Reviews**: Generate detailed literature reviews for each article
-- **Interactive UI**: Built with Streamlit for a modern, responsive interface
-- **Caching System**: Smart caching of processed articles for improved performance
-- **Progress Tracking**: Real-time updates on search and analysis progress
+## Technical Architecture
 
-## Components
+### Core Components
 
-### 1. Search Engine (`search_engine.py`)
-- Core search functionality with semantic understanding
-- Parallel processing of search results
-- Article caching and management
-- Integration with OpenAI compatible APIs for analysis
+1. **Query Processing Pipeline**
+   - Query analysis and decomposition
+   - Semantic search optimization
+   - Sub-query generation for comprehensive coverage
 
-### 2. NLP Utils (`nlp_utils.py`)
-- Natural language processing utilities
-- Literature review generation
-- Entity extraction and analysis
+2. **Fact Checking System**
+   - Automated claim generation from queries
+   - Real-time claim validation against source documents
+   - Confidence scoring and evidence tracking
 
-### 3. Stream Interface (`stream_interface.py`)
-- Streamlit-based user interface
-- Real-time progress updates
-- Interactive result display
-- Export functionality
+3. **Stream Interface**
+   - Real-time progress tracking
+   - Interactive chat interface
+   - Dynamic result visualization
+   - Downloadable search results
 
-## Setup
+4. **Data Sources**
+   - Wikipedia integration
+   - Efficient search and retrieval
+   - Document processing and analysis
 
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+## Technology Stack
 
-2. Set up environment variables:
-```bash
-export OPENAI_API_KEY=your_api_key
-export OPENAI_API_BASE=your_api_base
-```
+- **Backend**: Python with asyncio for concurrent processing
+- **Frontend**: Streamlit for interactive UI
+- **LLM Integration**: Custom LLM manager for model interactions
+- **Data Visualization**: Plotly for interactive charts and visualizations
+- **Logging**: Comprehensive logging system with configurable levels
 
-3. Run the application:
-```bash
-streamlit run app.py
-```
+## System Requirements
+
+- Python 3.8+
+- Required environment variables (see `.env.example`)
+- Sufficient memory for LLM operations
 
 ## Usage
 
-1. Enter your research query in the search box
-2. The system will:
-   - Search for relevant Wikipedia articles
-   - Analyze each article's content
-   - Generate individual literature reviews
-   - Display results with summaries and analyses
+1. Set up environment variables
+2. Install dependencies: `pip install -r requirements.txt`
+3. Run the application: `python app.py`
+4. Access the interface through your web browser
 
-3. Results include:
-   - Article summary
-   - Detailed analysis
-   - Literature review
-   - Source links
+## Pipeline Flow
 
-## Caching
-- Cached articles are stored in `article_cache/article_cache.json`
+1. Query Analysis → Decomposition → Search → Fact Checking
+2. Real-time result streaming and updates
+3. Interactive chat interface for refinements
+4. Export capabilities for search results
 
-## Technical Details
+## Error Handling
 
-### Search Process
-1. Query processing and semantic search
-2. Parallel article processing
-3. LLM-powered analysis
-4. Literature review generation
-5. Real-time result streaming
+- Comprehensive logging system
+- Graceful error recovery
+- User-friendly error messages
+- Debug mode for development
 
-### Result Types
-- Wiki summaries
-- Article analyses
-- Literature reviews
-- Progress updates
+## Search Capabilities
+
+- Semantic search
+- Query decomposition
+- Real-time results streaming
+- Fact validation
+- Result export functionality
+
+## Chat Interface
+
+- Interactive query refinement
+- Real-time response streaming
+- Thread management
+- Progress visualization
+
+## Data Management
+
+- Efficient data processing
+- Result caching
+- Export functionality
+- Session state management
 
 ## Contributing
 
